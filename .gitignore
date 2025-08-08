@@ -1,0 +1,6 @@
+__pycache__/
+myenv/
+results/
+data/
+.python-version
+fed_job.sh
