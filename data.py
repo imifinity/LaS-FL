@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler, random_split
 from torchvision import datasets, transforms
-# from datasets import load_dataset
+from datasets import load_dataset
 
 
 class CIFAR10Dataset(datasets.CIFAR10):
@@ -22,26 +22,26 @@ class CIFAR10Dataset(datasets.CIFAR10):
         return x, y
 
 
-# class TinyImageNetDataset:
-#     N_CLASSES = 10
-#     def __init__(self, split='train'):
-#         self.ds = load_dataset("zh-plus/tiny-imagenet", split=split)
-#         self.targets = [item['label'] for item in self.ds]
-#         self.transform = transforms.Compose([
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.4802, 0.4481, 0.3975),
-#                                  (0.2302, 0.2265, 0.2262)),
-#         ])
+class TinyImageNetDataset:
+    N_CLASSES = 200
+    def __init__(self, split='train'):
+        self.ds = load_dataset("zh-plus/tiny-imagenet", split=split, cache_dir="/users/adgs945/.cache/huggingface")
+        self.targets = [item['label'] for item in self.ds]
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4802, 0.4481, 0.3975),
+                                 (0.2302, 0.2265, 0.2262)),
+        ])
 
-#     def __len__(self):
-#         return len(self.ds)
+    def __len__(self):
+        return len(self.ds)
 
-#     def __getitem__(self, index):
-#         x, y = self.ds[index]['image'], self.ds[index]['label']
-#         if x.mode != "RGB":  # ensure RGB format
-#             x = x.convert("RGB")
-#         x = self.transform(x)
-#         return x, y
+    def __getitem__(self, index):
+        x, y = self.ds[index]['image'], self.ds[index]['label']
+        if x.mode != "RGB":  # ensure RGB format
+            x = x.convert("RGB")
+        x = self.transform(x)
+        return x, y
 
 
 def load_datasets(dataset="CIFAR10"):
@@ -49,9 +49,9 @@ def load_datasets(dataset="CIFAR10"):
         full_train = CIFAR10Dataset(root="./data", train=True)
         test_ds    = CIFAR10Dataset(root="./data", train=False)
         
-    # elif dataset == "TinyImageNet":
-    #     full_train = TinyImageNetDataset(split="train")
-    #     test_ds    = TinyImageNetDataset(split="valid")
+    elif dataset == "TinyImageNet":
+        full_train = TinyImageNetDataset(split="train")
+        test_ds    = TinyImageNetDataset(split="valid")
 
     else:
         raise ValueError(f"Invalid dataset name, {self.args.dataset}")

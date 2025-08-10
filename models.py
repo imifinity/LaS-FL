@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torchvision.models as models
 
 
 class MLP(nn.Module):
-    ''' A multilayer perceptron for 10-class classification (CIFAR-10). '''
+    ''' A multilayer perceptron for n-class classification. '''
     def __init__(self, input_size=3*32*32, hidden_size=256, num_classes=10):
         super(MLP, self).__init__() 
         self.fc1 = nn.Linear(input_size, hidden_size)
@@ -61,3 +62,15 @@ class CNN(nn.Module):
         x = self.fc3(x)
         return x
 
+
+class ResNet18(nn.Module):
+    ''' ResNet-18 for 200-class classification (TinyImageNet). '''
+    def __init__(self, n_channels=3, n_classes=200, input_size=64):
+        super(ResNet18TinyImageNet, self).__init__()
+        self.model = models.resnet18(weights=None) # Load ResNet-18 without pretrained weights
+        self.model.conv1 = nn.Conv2d(n_channels, 64, kernel_size=3, stride=1, padding=1, bias=False) # Modify for 64x64 images
+        self.model.maxpool = nn.Identity()  # Remove pooling
+        self.model.fc = nn.Linear(self.model.fc.in_features, n_classes) # Adjust final layer for 200 classes
+
+    def forward(self, x):
+        return self.model(x)

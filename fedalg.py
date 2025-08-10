@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 
 import argparse
 from data import load_datasets, FederatedSampler
-from models import CNN, MLP
-from utils import Logger, average_weights, Localiser, Stitcher, average_fedsoup_weights
+from models import CNN, MLP, ResNet18
+from utils import average_weights, Localiser, Stitcher, average_fedsoup_weights
 
 
 class FedAlg():
@@ -26,7 +26,6 @@ class FedAlg():
         self.device = torch.device(
             f"cuda:{args.device}" if torch.cuda.is_available() else "cpu"
         )
-        self.logger = Logger(args)
 
         self.train_loader, self.val_loader, self.test_loader = self._get_data(
             root=self.args.data_root,
@@ -43,6 +42,8 @@ class FedAlg():
             elif self.args.model_name == "cnn":
                 self.root_model = CNN().to(self.device)
                 self.target_acc = 0.99
+            elif self.args.model_name == "resnet18":
+                raise ValueError(f"Incompatible model, {self.args.model_name} with {self.args.dataset}")
             else:
                 raise ValueError(f"Invalid model name, {self.args.model_name}")
 
@@ -51,9 +52,11 @@ class FedAlg():
             if self.args.model_name == "mlp":
                 self.root_model = MLP(input_size=3*64*64, hidden_size=1024, num_classes=200).to(self.device)
                 self.target_acc = 0.97
-            elif self.args.model_name == "cnn":
-                self.root_model = CNN(n_channels=3, n_classes=200, input_size=64).to(self.device)
+            elif self.args.model_name == "resnet18":
+                self.root_model = ResNet18().to(self.device)
                 self.target_acc = 0.99
+            elif self.args.model_name == "cnn":
+                raise ValueError(f"Incompatible model, {self.args.model_name} with {self.args.dataset}")
             else:
                 raise ValueError(f"Invalid model name, {self.args.model_name}")
 
@@ -251,8 +254,6 @@ class FedAlg():
                     logs["reached_target_at"] = self.reached_target_at
                     print(f"\n -----> Target accuracy {self.target_acc*100}% reached at round {epoch}! <----- \n")
 
-                self.logger.log(logs)
-
                 # Print results to CLI
                 print(f"\nResults after {epoch + 1} rounds of training:")
                 print(f"---> Avg Training Loss: {avg_train_loss:.4f}")
@@ -330,7 +331,6 @@ class FedAlg():
             "test/loss": avg_loss,
             "test/acc": avg_acc
         }
-        self.logger.log(logs)
 
         # Print results to CLI
         print("Test results:")

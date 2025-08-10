@@ -2,7 +2,6 @@ from typing import Any, Dict, List
 import argparse
 import os
 import copy
-import wandb
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -36,10 +35,6 @@ def arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--device", type=int, default=0)
 
-    parser.add_argument("--wandb", type=bool, default=False)
-    parser.add_argument("--wandb_project", type=str, default="FedAvg")
-    parser.add_argument("--exp_name", type=str, default="exp")
-
     parser.add_argument('--graft_epochs', type=int, default=5)
     parser.add_argument('--graft_lr', type=float, default=0.01)
     parser.add_argument('--topk', type=float, default=0.2)
@@ -48,19 +43,6 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--l1_strength', type=float, default=0.0)
 
     return parser.parse_args()
-
-
-class Logger:
-    def __init__(self, args):
-        self.args = args
-        self.wandb = None
-        if args.wandb:
-            wandb.init(project=args.wandb_project, name=args.exp_name, config=args)
-            self.wandb = wandb
-
-    def log(self, logs: Dict[str, Any]) -> None:
-        if self.wandb:
-            self.wandb.log(logs)
 
 
 def average_weights(weights: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
