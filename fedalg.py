@@ -30,7 +30,7 @@ class FedAlg():
         self.train_loader, self.val_loader, self.test_loader = self._get_data(
             root=self.args.data_root,
             n_clients=self.args.n_clients,
-            n_shards=self.args.n_shards,
+            dir_alpha=self.args.dirichlet,
             non_iid=self.args.non_iid,
         )
 
@@ -76,13 +76,13 @@ class FedAlg():
         self.reached_target_at = None  # type: int
 
     def _get_data(
-        self, root: str, n_clients: int, n_shards: int, non_iid: int
+        self, root: str, n_clients: int, dir_alpha: float, non_iid: int
     ) -> Tuple[DataLoader, DataLoader]:
         """
         Args:
             root (str): path to the dataset.
             n_clients (int): number of clients.
-            n_shards (int): number of shards.
+            dir_alpha (float): Dirichlet distribution parameter.
             non_iid (int): 0: IID, 1: Non-IID
 
         Returns:
@@ -91,9 +91,7 @@ class FedAlg():
 
         train_set, val_set, test_set = load_datasets(self.args.dataset)
 
-        sampler = FederatedSampler(
-            train_set, non_iid=non_iid, n_clients=n_clients, n_shards=n_shards
-        )
+        sampler = FederatedSampler(train_set, non_iid=non_iid, n_clients=n_clients, dir_alpha=dir_alpha)
 
         batch_size = self.args.batch_size
 
@@ -178,6 +176,14 @@ class FedAlg():
                 for client_idx in idx_clients:
                     # Set client in the sampler
                     self.train_loader.sampler.set_client(client_idx)
+
+                    # Added thing!!!!!!!!!!!!!!!!!!!
+                    # self.train_loader = DataLoader(
+                    #     self.train_loader.dataset,
+                    #     batch_size=self.train_loader.batch_size,
+                    #     sampler=self.train_loader.sampler,
+                    #     shuffle=False,
+                    # )
 
                     # Train client
                     client_model, client_loss = self._train_client(

@@ -1,9 +1,11 @@
 from typing import Dict, List, Optional, Sequence
 import numpy as np
 import torch
-from torch.utils.data import Dataset, Sampler, random_split
+from torch.utils.data import Dataset, Sampler, random_split, ConcatDataset
 from torchvision import datasets, transforms
-from datasets import load_dataset
+import pandas as pd
+from PIL import Image
+from io import BytesIO
 
 
 class CIFAR10Dataset(datasets.CIFAR10):
@@ -25,8 +27,9 @@ class CIFAR10Dataset(datasets.CIFAR10):
 class TinyImageNetDataset:
     N_CLASSES = 200
     def __init__(self, split='train'):
-        self.ds = load_dataset("zh-plus/tiny-imagenet", split=split, cache_dir="/users/adgs945/.cache/huggingface")
-        self.targets = [item['label'] for item in self.ds]
+        splits = {'train': 'data/train.parquet', 'valid': 'data/valid.parquet'}
+        self.ds = pd.read_parquet(splits[split])
+        self.targets = self.ds["label"].tolist()
         self.transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.4802, 0.4481, 0.3975),
@@ -37,36 +40,39 @@ class TinyImageNetDataset:
         return len(self.ds)
 
     def __getitem__(self, index):
-        x, y = self.ds[index]['image'], self.ds[index]['label']
-        if x.mode != "RGB":  # ensure RGB format
-            x = x.convert("RGB")
-        x = self.transform(x)
+        img_dict = self.ds.iloc[index]["image"]
+        img_bytes = img_dict['bytes']
+        img = Image.open(BytesIO(img_bytes)).convert("RGB")  # decode bytes to RGB PIL image
+
+        x = self.transform(img)
+        y = self.targets[index]
         return x, y
 
 
 def load_datasets(dataset="CIFAR10"):
     if dataset == "CIFAR10":
-        full_train = CIFAR10Dataset(root="./data", train=True)
+        train_ds = CIFAR10Dataset(root="./data", train=True)
         test_ds    = CIFAR10Dataset(root="./data", train=False)
         
     elif dataset == "TinyImageNet":
-        full_train = TinyImageNetDataset(split="train")
+        train_ds = TinyImageNetDataset(split="train")
         test_ds    = TinyImageNetDataset(split="valid")
 
     else:
         raise ValueError(f"Invalid dataset name, {self.args.dataset}")
 
-    n_train    = len(full_train)
-    n_val      = int(0.1 * n_train)
-    n_train    = n_train - n_val
+    n = len(train_ds)
+    n_val = int(0.1 * n)
+    n_train = n - n_val
     
     train_ds, val_ds = random_split(
-        full_train,
+        train_ds,
         [n_train, n_val],
         generator=torch.Generator().manual_seed(42)
     )
 
     return train_ds, val_ds, test_ds
+
 
 
 class FederatedSampler(Sampler):
@@ -75,7 +81,7 @@ class FederatedSampler(Sampler):
         dataset: Sequence,
         non_iid: int,
         n_clients: Optional[int] = 100,
-        n_shards: Optional[int] = 200,
+        dir_alpha: Optional[float] = 0.5,
     ):
         """Sampler for federated learning in both iid and non-iid settings.
 
@@ -83,12 +89,12 @@ class FederatedSampler(Sampler):
             dataset (Sequence): Dataset to sample from.
             non_iid (int): 0: IID, 1: Non-IID
             n_clients (Optional[int], optional): Number of clients. Defaults to 100.
-            n_shards (Optional[int], optional): Number of shards. Defaults to 200.
+            dir_alpha (Optional[int], optional): Dirichlet dist. param. Defaults to 0.5.
         """
         self.dataset = dataset
         self.non_iid = non_iid
         self.n_clients = n_clients
-        self.n_shards = n_shards
+        self.dir_alpha = dir_alpha
 
         if self.non_iid:
             self.dict_users = self._sample_non_iid()
@@ -100,38 +106,41 @@ class FederatedSampler(Sampler):
         dict_users, all_idxs = {}, [i for i in range(len(self.dataset))]
 
         for i in range(self.n_clients):
-            dict_users[i] = set(np.random.choice(all_idxs, num_items, replace=False))
-            all_idxs = list(set(all_idxs) - dict_users[i])
+            if i == self.n_clients - 1:  # last client takes the remainder
+                dict_users[i] = set(all_idxs)
+            else:
+                dict_users[i] = set(np.random.choice(all_idxs, num_items, replace=False))
+                all_idxs = list(set(all_idxs) - dict_users[i])
 
         return dict_users
 
     def _sample_non_iid(self) -> Dict[int, List[int]]:
-        num_imgs = len(self.dataset) // self.n_shards
-
-        idx_shard = [i for i in range(self.n_shards)]
-        dict_users = {i: np.array([]) for i in range(self.n_clients)}
-        idxs = np.arange(self.n_shards * num_imgs)
-        
         if hasattr(self.dataset, 'dataset') and hasattr(self.dataset.dataset, 'targets'):
-            # For Subset objects
-            labels = np.array([self.dataset.dataset.targets[i] for i in self.dataset.indices])
+            all_indices = np.arange(len(self.dataset))
+            labels = np.array([self.dataset.dataset.targets[i] for i in all_indices])
         else:
             labels = np.array(self.dataset.targets)
+            all_indices = np.arange(len(self.dataset))
 
-        # sort labels
-        idxs_labels = np.vstack((idxs, labels))
-        idxs_labels = idxs_labels[:, idxs_labels[1, :].argsort()]
-        idxs = idxs_labels[0, :]
+        num_classes = len(np.unique(labels))
+        dict_users = {i: [] for i in range(self.n_clients)}
 
-        # divide and assign 2 shards/client
-        for i in range(self.n_clients):
-            rand_set = set(np.random.choice(idx_shard, 2, replace=False))
-            idx_shard = list(set(idx_shard) - rand_set)
-            for rand in rand_set:
-                dict_users[i] = np.concatenate(
-                    (dict_users[i], idxs[rand * num_imgs : (rand + 1) * num_imgs]),
-                    axis=0,
-                )
+        # Group indices by class
+        class_indices = [np.where(labels == i)[0] for i in range(num_classes)]
+
+        # Allocate samples for each class based on Dirichlet proportions
+        for c, indices in enumerate(class_indices):
+            np.random.shuffle(indices)
+            proportions = np.random.dirichlet([self.dir_alpha] * self.n_clients)
+            proportions = (np.cumsum(proportions) * len(indices)).astype(int)[:-1]
+            splits = np.split(indices, proportions)
+
+            for i, client_indices in enumerate(splits):
+                dict_users[i].extend(client_indices)
+
+        # Convert lists to numpy arrays
+        for i in dict_users:
+            dict_users[i] = np.array(dict_users[i])
 
         return dict_users
 
