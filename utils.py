@@ -14,17 +14,20 @@ from data import load_datasets, FederatedSampler
 def arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
 
+    # Mode args
     parser.add_argument("--data_root", type=str, default="./data/")
     parser.add_argument("--algorithm", type=str, default="fedavg")
     parser.add_argument("--dataset", type=str, default="CIFAR10")
     parser.add_argument("--model_name", type=str, default="cnn")
 
+    # Fed args
     parser.add_argument("--non_iid", type=int, default=1)  # 0: IID, 1: Non-IID
     parser.add_argument("--dirichlet", type=float, default=0.5)  
     parser.add_argument("--n_clients", type=int, default=10)
-    parser.add_argument("--frac", type=float, default=0.1)
+    parser.add_argument("--frac", type=float, default=0.5)
 
-    parser.add_argument("--n_epochs", type=int, default=1000)
+    # Training args
+    parser.add_argument("--n_epochs", type=int, default=100)
     parser.add_argument("--n_client_epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--optim", type=str, default="sgd")
@@ -32,9 +35,9 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--log_every", type=int, default=1)
     parser.add_argument("--early_stopping", type=int, default=1)
-
     parser.add_argument("--device", type=int, default=0)
 
+    # LaS args
     parser.add_argument('--graft_epochs', type=int, default=5)
     parser.add_argument('--graft_lr', type=float, default=0.01)
     parser.add_argument('--topk', type=float, default=0.2)
@@ -42,22 +45,34 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--sigmoid_bias', type=float, default=2.0)
     parser.add_argument('--l1_strength', type=float, default=0.0)
 
+    # FedAcg args
+    parser.add_argument("--acg_momentum", type=float, default=0.1)
+
     return parser.parse_args()
 
 
-def average_weights(weights: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+def average_weights(weights):
+    """ Implementation of FedAvg based on the paper:
+        McMahan, B. et al. (2017) 'Communication-Efficient Learning of Deep Networks from Decentralized Data', 
+        in Proceedings of the 20th International Conference on Artificial Intelligence and Statistics. Artificial 
+        Intelligence and Statistics, PMLR, pp. 1273-1282. Available at: https://proceedings.mlr.press/v54/mcmahan17a.html.
+    """
     weights_avg = copy.deepcopy(weights[0])
+    total_bytes = 0
 
     for key in weights_avg.keys():
         for i in range(1, len(weights)):
             weights_avg[key] += weights[i][key]
         weights_avg[key] = torch.div(weights_avg[key], len(weights))
 
-    return weights_avg
+        # Count bytes for this parameter across all clients
+        total_bytes += weights_avg[key].numel() * weights_avg[key].element_size() * len(weights)
+
+    return weights_avg, total_bytes
 
 
 class Localiser(nn.Module):
-    """ Implementation of FedSoup based on the paper:
+    """ Implementation of Localise-and-Stitch based on the paper:
         He, Y. et al. (2024) 'Localize-and-Stitch: Efficient Model Merging via Sparse Task Arithmetic'. arXiv. 
         Available at: https://doi.org/10.48550/arXiv.2408.13656.
     """
@@ -117,7 +132,6 @@ class Localiser(nn.Module):
             basepatch.append(mask)
 
         result = sum(torch.sum(torch.round(torch.sigmoid(p))) for p in basepatch) / self.num_params
-        print(f"Total parameters in mask: {result:.6f}")
               
         return basepatch
 
@@ -125,6 +139,7 @@ class Localiser(nn.Module):
         sigmoid = torch.nn.Sigmoid()
         binary_mask = []
         n_graft_params = 0
+        total_bytes = 0
 
         with torch.no_grad():
             for i, name in enumerate(self.trainable_name):
@@ -139,8 +154,14 @@ class Localiser(nn.Module):
                 n_graft_params += frac.sum()
                 self.params[name].data.add_(frac * (finetensor - pretensor))
 
+                # Count bytes sent for this layer (mask + delta)
+                total_bytes += frac.numel() * frac.element_size()  # mask
+                total_bytes += (finetensor - pretensor).numel() * (finetensor - pretensor).element_size()  # delta
+
         if return_mask:
-            return binary_mask, n_graft_params / self.num_params
+            return binary_mask, n_graft_params / self.num_params, total_bytes
+        else:
+            return n_graft_params / self.num_params, total_bytes
 
     def evaluate(self, dataloader):
         self.model.eval()
@@ -157,7 +178,6 @@ class Localiser(nn.Module):
                 total += y.size(0)
 
         acc = correct / total
-        print(f"Mask evaluation Accuracy: {acc*100:.2f}%")
 
     def train_graft(self, dataloader):
         loss_fct = nn.CrossEntropyLoss()
@@ -269,6 +289,7 @@ class Stitcher(nn.Module):
         trainable_names = list(self.params.keys())
         self.model.to(self.device)
         self.pretrained.to(self.device)
+        total_bytes = 0
 
         for fm, client_mask in zip(self.finetuned_models, self.masks):
             fm.to(self.device)
@@ -281,13 +302,40 @@ class Stitcher(nn.Module):
                     delta = (finetensor - pretensor) * client_mask[idx].to(self.device)
                     self.params[name].data.add_(delta)
 
-        return self.model
+                    # Count bytes for delta and mask
+                    total_bytes += delta.numel() * delta.element_size()
+                    total_bytes += client_mask[idx].numel() * client_mask[idx].element_size()
+
+        return self.model, total_bytes  
 
 
-def average_fedsoup_weights(weights: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-    """ 
-    Implementation of FedSoup based on the paper:
-    Chen, M. et al. (2023) 'FedSoup: Improving Generalization and Personalization in Federated Learning via Selective Model Interpolation'. arXiv. 
-    Available at: https://doi.org/10.48550/arXiv.2307.10507.
+def FedACG_lookahead(model: nn.Module, prev_global_state: dict, acg_momentum: float) -> nn.Module:
+    """ Implementation of FedAcg based on the paper:
+        Kim, G., Kim, J. and Han, B. (2024) 'Communication-Efficient Federated Learning with Accelerated 
+        Client Gradient', in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). 
+        2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), Seattle, WA, USA: 
+        IEEE, pp. 12385-12394. Available at: https://doi.org/10.1109/CVPR52733.2024.01177.
     """
+    lookahead_model = copy.deepcopy(model)
+    for k, v in lookahead_model.state_dict().items():
+        v_prev = prev_global_state[k]
+        v.data += acg_momentum * (v.data - v_prev.data)
+    return lookahead_model
+
+def average_fedft_weights(weights):
+    """ Implementation of FedFT based on the paper:
+        Palihawadana, C. et al. (2024) 'FedFT: Improving Communication Performance for Federated Learning 
+        with Frequency Space Transformation'. arXiv. Available at: https://doi.org/10.48550/arXiv.2409.05242.
+    """
+    
+    pass
+
+def average_feddyn_weights(weights):
+    """ Implementation of FedDyn based on the paper:
+        Jin, C. et al. (2023) 'FedDyn: A dynamic and efficient federated distillation approach on Recommender 
+        System', in 2022 IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS). 
+        2022 IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS), pp. 786-793. 
+        Available at: https://doi.org/10.1109/ICPADS56603.2022.00107.
+    """
+    
     pass

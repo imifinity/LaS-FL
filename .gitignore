@@ -4,3 +4,5 @@ results/
 data/
 .python-version
 fed_job.sh
+TIN_job.sh
+import_tin.py

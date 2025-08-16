@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 import argparse
 from data import load_datasets, FederatedSampler
 from models import CNN, MLP, ResNet18
-from utils import average_weights, Localiser, Stitcher, average_fedsoup_weights
+from utils import average_weights, Localiser, Stitcher, FedACG_lookahead
 
 
 class FedAlg():
@@ -114,11 +114,16 @@ class FedAlg():
         Returns:
             Tuple[nn.Module, float]: client model, average client loss.
         """
+
         model = copy.deepcopy(root_model)
         model.train()
         optimizer = torch.optim.SGD(
             model.parameters(), lr=self.args.lr, momentum=self.args.momentum
         )
+
+        # Store global params for FedProx
+        if self.args.algorithm == "fedprox":
+            global_params = {k: v.clone().detach().to(self.device) for k, v in root_model.state_dict().items()} 
 
         for epoch in range(self.args.n_client_epochs):
             epoch_loss = 0.0
@@ -131,6 +136,18 @@ class FedAlg():
 
                 logits = model(data)
                 loss = F.cross_entropy(logits, target)
+                
+                # FedProx only - adds proximal term
+                """ Code based on the paper:
+                Yuan, X.-T. and Li, P. (2022) 'On Convergence of FedProx: Local Dissimilarity Invariant Bounds, 
+                Non-smoothness and Beyond', Advances in Neural Information Processing Systems, 35, pp. 10752-10765.
+                """
+                if self.args.algorithm == "fedprox":
+                    prox_reg = 0.0
+                    for (name, param) in model.named_parameters():
+                        prox_reg += ((param - global_params[name]) ** 2).sum()
+                    loss = loss + (self.args.momentum / 2.0) * prox_reg
+
                 loss.backward()
                 optimizer.step()
 
@@ -149,7 +166,12 @@ class FedAlg():
     def train(self) -> None:
         """Train a server model."""
         train_losses = []
+        
         t0 = time.perf_counter()
+
+        # Initialize previous global state for FedACG
+        if self.args.algorithm == "fedacg":
+            self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
 
         for epoch in range(self.args.n_epochs):
             t1 = time.perf_counter()
@@ -163,48 +185,52 @@ class FedAlg():
             m = max(int(self.args.frac * self.args.n_clients), 1)
             idx_clients = np.random.choice(range(self.args.n_clients), m, replace=False)
 
+            if self.args.algorithm == "fedacg":
+                sending_model = FedACG_lookahead(
+                    model=self.root_model,
+                    prev_global_state=self.prev_global_state,
+                    acg_momentum=self.args.acg_momentum
+                )
+            else:
+                sending_model = self.root_model
+
             if self.args.algorithm == "las":
                 masks = []
                 ft_models = []
+                total_bytes = 0
 
                 # Make a copy of the model before training
-                self.pretrained_model = copy.deepcopy(self.root_model)
+                self.pretrained_model = copy.deepcopy(sending_model)
 
                 # Train clients
-                self.root_model.train()
+                sending_model.train()
 
                 for client_idx in idx_clients:
                     # Set client in the sampler
                     self.train_loader.sampler.set_client(client_idx)
 
-                    # Added thing!!!!!!!!!!!!!!!!!!!
-                    # self.train_loader = DataLoader(
-                    #     self.train_loader.dataset,
-                    #     batch_size=self.train_loader.batch_size,
-                    #     sampler=self.train_loader.sampler,
-                    #     shuffle=False,
-                    # )
-
                     # Train client
                     client_model, client_loss = self._train_client(
-                        root_model=self.root_model,
+                        root_model=sending_model,
                         train_loader=self.train_loader,
                         client_idx=client_idx,
                     )
+
                     clients_models.append(client_model.state_dict())
                     clients_losses.append(client_loss)
                     ft_models.append(client_model)
 
                     localiser = Localiser(
                             trainable_params=dict(client_model.named_parameters()),
-                            model=self.root_model.eval(),
+                            model=sending_model.eval(),
                             pretrained_model=self.pretrained_model,
                             finetuned_model=client_model,
                             graft_args=self.graft_args
                         )
 
-                    mask, _, _ = localiser.train_graft(self.train_loader)
+                    mask, proportion, bytes_this_client = localiser.train_graft(self.train_loader)
                     masks.append(mask)
+                    total_bytes += bytes_this_client
 
                 stitcher = Stitcher(
                     trainable_params=dict(client_model.named_parameters()),
@@ -212,17 +238,18 @@ class FedAlg():
                     finetuned_models=ft_models,
                     masks=masks)
 
-                stitched_model = stitcher.interpolate_models()
+                stitched_model, bytes_stitcher = stitcher.interpolate_models()
+                total_bytes += bytes_stitcher
+
                 updated_weights = stitched_model.state_dict()
 
             else:
                 for client_idx in idx_clients:
-                    # Set client in the sampler
                     self.train_loader.sampler.set_client(client_idx)
 
                     # Train client
                     client_model, client_loss = self._train_client(
-                        root_model=self.root_model,
+                        root_model=sending_model,
                         train_loader=self.train_loader,
                         client_idx=client_idx,
                     )
@@ -230,14 +257,23 @@ class FedAlg():
                     clients_losses.append(client_loss)
 
                 # Update server model based on clients models
-                if self.args.algorithm == "fedavg":
-                    updated_weights = average_weights(clients_models)
-                elif self.args.algorithm == "fedsoup":
-                    pass
+                if self.args.algorithm in ["fedavg", "fedprox", "fedacg"]:
+                    updated_weights, total_bytes = average_weights(clients_models)
                 else:
                     raise ValueError(f"Invalid algorithm name, {self.args.algorithm}")
 
+            # Update the server model
             self.root_model.load_state_dict(updated_weights)
+
+            # FedAcg only - compute local deltas relative to what clients received
+            if self.args.algorithm == "fedacg":
+                clients_deltas = []
+                sending_state = sending_model.state_dict()
+                for client_state in clients_models:
+                    delta = {k: client_state[k] - sending_state[k] for k in sending_state}
+                    clients_deltas.append(delta)
+                # Update previous global state for next FedACG lookahead
+                self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
 
             # Update average loss of this round
             avg_loss = sum(clients_losses) / len(clients_losses)
@@ -260,10 +296,11 @@ class FedAlg():
                     logs["reached_target_at"] = self.reached_target_at
                     print(f"\n -----> Target accuracy {self.target_acc*100}% reached at round {epoch}! <----- \n")
 
-                # Print results to CLI
+                # Print results
                 print(f"\nResults after {epoch + 1} rounds of training:")
                 print(f"---> Avg Training Loss: {avg_train_loss:.4f}")
                 print(f"---> Avg Val Loss: {total_loss:.4f} | Avg Val Accuracy: {total_acc*100:.4f}%")
+                print(f"Communication loss (bytes): {total_bytes}")
 
                 t2 = time.perf_counter()
                 print(f"Round {epoch+1} took {(t2-t1):.3f} seconds")

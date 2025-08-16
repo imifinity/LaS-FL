@@ -66,7 +66,7 @@ class CNN(nn.Module):
 class ResNet18(nn.Module):
     ''' ResNet-18 for 200-class classification (TinyImageNet). '''
     def __init__(self, n_channels=3, n_classes=200, input_size=64):
-        super(ResNet18TinyImageNet, self).__init__()
+        super(ResNet18, self).__init__()
         self.model = models.resnet18(weights=None) # Load ResNet-18 without pretrained weights
         self.model.conv1 = nn.Conv2d(n_channels, 64, kernel_size=3, stride=1, padding=1, bias=False) # Modify for 64x64 images
         self.model.maxpool = nn.Identity()  # Remove pooling

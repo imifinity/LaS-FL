@@ -5,6 +5,7 @@ from fedalg import FedAlg
 def main():
     # Get args
     args = arg_parser()
+    print(args.algorithm + "\n" + args.dataset)
 
     # Get federated algorithm
     fed_alg = FedAlg(args)
