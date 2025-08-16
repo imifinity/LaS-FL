@@ -117,6 +117,15 @@ class FedAlg():
 
         model = copy.deepcopy(root_model)
         model.train()
+        
+        # FedDyn - initialise alpha
+        if self.args.algorithm == "feddyn":
+            if not hasattr(self, "client_alphas"):
+                self.client_alphas = [None] * self.args.n_clients
+            if self.client_alphas[client_idx] is None:
+                self.client_alphas[client_idx] = [torch.zeros_like(p) for p in model.parameters()]
+            alpha = self.client_alphas[client_idx]
+        
         optimizer = torch.optim.SGD(
             model.parameters(), lr=self.args.lr, momentum=self.args.momentum
         )
@@ -136,17 +145,38 @@ class FedAlg():
 
                 logits = model(data)
                 loss = F.cross_entropy(logits, target)
+
+                # FedDyn - dynamic regularisation
+                """ Code based on the paper:
+                Jin, C. et al. (2023) 'FedDyn: A dynamic and efficient federated distillation approach on Recommender 
+                System', in 2022 IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS). 2022 
+                IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS), pp. 786-793. 
+                Available at: https://doi.org/10.1109/ICPADS56603.2022.00107.
+                """
+                if self.args.algorithm == "feddyn":
+                    # Dynamic term: <theta, alpha>
+                    dynamic_loss = sum((p * a).sum() for p, a in zip(model.parameters(), alpha))
+                    
+                    # Optional proximal term (like FedProx)
+                    mu = getattr(self.args, "mu", 0.0)
+                    if mu > 0:
+                        global_params = [p.clone().detach() for p in root_model.parameters()]
+                        prox_loss = (mu / 2) * sum(((p - p0)**2).sum() for p, p0 in zip(model.parameters(), global_params))
+                    else:
+                        prox_loss = 0.0
+                    
+                    loss = loss + dynamic_loss + prox_loss
                 
-                # FedProx only - adds proximal term
+                # FedProx - add proximal term
                 """ Code based on the paper:
                 Yuan, X.-T. and Li, P. (2022) 'On Convergence of FedProx: Local Dissimilarity Invariant Bounds, 
                 Non-smoothness and Beyond', Advances in Neural Information Processing Systems, 35, pp. 10752-10765.
                 """
                 if self.args.algorithm == "fedprox":
-                    prox_reg = 0.0
+                    reg = 0.0
                     for (name, param) in model.named_parameters():
-                        prox_reg += ((param - global_params[name]) ** 2).sum()
-                    loss = loss + (self.args.momentum / 2.0) * prox_reg
+                        reg += ((param - global_params[name]) ** 2).sum()
+                    loss = loss + (self.args.momentum / 2.0) * reg
 
                 loss.backward()
                 optimizer.step()
@@ -158,6 +188,12 @@ class FedAlg():
             # Calculate average accuracy and loss
             epoch_loss /= idx
             epoch_acc = epoch_correct / epoch_samples
+
+            # FedDyn - update alpha
+            if self.args.algorithm == "feddyn":
+                with torch.no_grad():
+                    for i, p in enumerate(model.parameters()):
+                        alpha[i] = alpha[i] - (p - list(root_model.parameters())[i]) / self.args.n_clients
 
             print(f"Client #{client_idx} | Epoch: {epoch+1}/{self.args.n_client_epochs} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc*100:.4f}%")
             
@@ -182,7 +218,7 @@ class FedAlg():
             clients_losses = []
 
             # Randomly select clients
-            m = max(int(self.args.frac * self.args.n_clients), 1)
+            m = max(int(self.args.participation * self.args.n_clients), 1)
             idx_clients = np.random.choice(range(self.args.n_clients), m, replace=False)
 
             if self.args.algorithm == "fedacg":
@@ -257,7 +293,7 @@ class FedAlg():
                     clients_losses.append(client_loss)
 
                 # Update server model based on clients models
-                if self.args.algorithm in ["fedavg", "fedprox", "fedacg"]:
+                if self.args.algorithm in ["fedavg", "fedprox", "fedacg", "feddyn"]:
                     updated_weights, total_bytes = average_weights(clients_models)
                 else:
                     raise ValueError(f"Invalid algorithm name, {self.args.algorithm}")

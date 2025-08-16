@@ -24,7 +24,7 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--non_iid", type=int, default=1)  # 0: IID, 1: Non-IID
     parser.add_argument("--dirichlet", type=float, default=0.5)  
     parser.add_argument("--n_clients", type=int, default=10)
-    parser.add_argument("--frac", type=float, default=0.5)
+    parser.add_argument("--participation", type=float, default=0.5)
 
     # Training args
     parser.add_argument("--n_epochs", type=int, default=100)
