@@ -1,16 +1,18 @@
-from utils import arg_parser
-from typing import Any, Dict, List, Optional, Tuple
 import copy
 import numpy as np
+import os
+import pandas as pd
 import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from typing import Any, Dict, List, Optional, Tuple
+from utils import arg_parser
 
 import argparse
 from data import load_datasets, FederatedSampler
-from models import CNN, MLP, ResNet18
+from models import ResNet
 from utils import average_weights, Localiser, Stitcher, FedACG_lookahead
 
 
@@ -36,32 +38,28 @@ class FedAlg():
 
         if self.args.dataset == "CIFAR10":
 
-            if self.args.model_name == "mlp":
-                self.root_model = MLP().to(self.device)
-                self.target_acc = 0.97
-            elif self.args.model_name == "cnn":
+            if self.args.model_name == "cnn":
                 self.root_model = CNN().to(self.device)
-                self.target_acc = 0.99
             elif self.args.model_name == "resnet18":
-                raise ValueError(f"Incompatible model, {self.args.model_name} with {self.args.dataset}")
+                self.root_model = ResNet(depth=18, n_classes=10).to(self.device)
+            elif self.args.model_name == "resnet50":
+                self.root_model = ResNet(depth=50, n_classes=10).to(self.device)
             else:
                 raise ValueError(f"Invalid model name, {self.args.model_name}")
 
         elif self.args.dataset == "TinyImageNet":
 
-            if self.args.model_name == "mlp":
-                self.root_model = MLP(input_size=3*64*64, hidden_size=1024, num_classes=200).to(self.device)
-                self.target_acc = 0.97
-            elif self.args.model_name == "resnet18":
-                self.root_model = ResNet18().to(self.device)
-                self.target_acc = 0.99
-            elif self.args.model_name == "cnn":
-                raise ValueError(f"Incompatible model, {self.args.model_name} with {self.args.dataset}")
+            if self.args.model_name == "resnet18":
+                self.root_model = ResNet(depth=18, n_classes=200, pretrained=True).to(self.device)
+            elif self.args.model_name == "resnet50":
+                self.root_model = ResNet(depth=50, n_classes=200, pretrained=True).to(self.device)
             else:
                 raise ValueError(f"Invalid model name, {self.args.model_name}")
 
         else:
             raise ValueError(f"Invalid dataset name, {self.args.dataset}")
+
+        self.target_acc = 0.99
 
         self.graft_args = argparse.Namespace(
             device=self.args.device,
@@ -172,11 +170,12 @@ class FedAlg():
                 Yuan, X.-T. and Li, P. (2022) 'On Convergence of FedProx: Local Dissimilarity Invariant Bounds, 
                 Non-smoothness and Beyond', Advances in Neural Information Processing Systems, 35, pp. 10752-10765.
                 """
+
                 if self.args.algorithm == "fedprox":
-                    reg = 0.0
+                    prox_loss = 0.0
                     for (name, param) in model.named_parameters():
-                        reg += ((param - global_params[name]) ** 2).sum()
-                    loss = loss + (self.args.momentum / 2.0) * reg
+                        prox_loss += ((param - global_params[name].to(param.device)) ** 2).sum()
+                    loss = loss + (self.args.prox_momentum / 2.0) * prox_loss
 
                 loss.backward()
                 optimizer.step()
@@ -208,6 +207,8 @@ class FedAlg():
         # Initialize previous global state for FedACG
         if self.args.algorithm == "fedacg":
             self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
+
+        comm_bytes = []
 
         for epoch in range(self.args.n_epochs):
             t1 = time.perf_counter()
@@ -264,7 +265,7 @@ class FedAlg():
                             graft_args=self.graft_args
                         )
 
-                    mask, proportion, bytes_this_client = localiser.train_graft(self.train_loader)
+                    mask, proportion, acc, bytes_this_client = localiser.train_graft(self.train_loader)
                     masks.append(mask)
                     total_bytes += bytes_this_client
 
@@ -338,6 +339,8 @@ class FedAlg():
                 print(f"---> Avg Val Loss: {total_loss:.4f} | Avg Val Accuracy: {total_acc*100:.4f}%")
                 print(f"Communication loss (bytes): {total_bytes}")
 
+                comm_bytes.append(total_bytes)
+
                 t2 = time.perf_counter()
                 print(f"Round {epoch+1} took {(t2-t1):.3f} seconds")
 
@@ -347,7 +350,12 @@ class FedAlg():
                     break
 
         t3 = time.perf_counter()
-        print(f"\nTraining took {(t3-t0):.3f}seconds\n")
+
+        self.train_time = round(t3 - t0, 3)
+        print(f"\nTraining took {self.train_time}seconds\n")
+       
+        self.avg_comm_bytes = round(np.mean(comm_bytes), 3)
+        print(f"Average communication loss per epoch: {self.avg_comm_bytes}bytes\n")
     
     def validate(self) -> Tuple[float, float]:
         """Validate the server model.
@@ -414,3 +422,27 @@ class FedAlg():
         # Print results to CLI
         print("Test results:")
         print(f"---> Avg Test Loss: {avg_loss:.4f} | Avg Test Accuracy: {avg_acc*100:.4f}%\n")
+
+        # Write results to CSV file
+        results = {
+            "method": self.args.algorithm,
+            "dataset": self.args.dataset,
+            "model": self.args.model_name,
+            "rounds": self.args.n_epochs,
+            "accuracy": avg_acc,
+            "loss": avg_loss,
+            "communication": self.avg_comm_bytes,
+            "train_time": self.train_time
+        }
+
+        # Convert to dataframe
+        results_df = pd.DataFrame([results])
+
+        # File to save results
+        r_filename = "experiment_results.csv"
+
+        # Append if file exists, otherwise create new file with header
+        if os.path.isfile(r_filename):
+            df.to_csv(r_filename, mode='a', header=False, index=False)
+        else:
+            df.to_csv(r_filename, index=False)

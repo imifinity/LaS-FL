@@ -1,15 +1,16 @@
-from typing import Any, Dict, List
 import argparse
-import os
 import copy
+import os
 import numpy as np
-from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+from typing import Any, Dict, List
 
 from data import load_datasets, FederatedSampler
+
 
 def arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -31,21 +32,22 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n_client_epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--optim", type=str, default="sgd")
-    parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--log_every", type=int, default=1)
     parser.add_argument("--early_stopping", type=int, default=1)
     parser.add_argument("--device", type=int, default=0)
 
     # LaS args
-    parser.add_argument('--graft_epochs', type=int, default=5)
-    parser.add_argument('--graft_lr', type=float, default=0.01)
+    parser.add_argument('--graft_epochs', type=int, default=20) # was 10 from paper
+    parser.add_argument('--graft_lr', type=float, default=1e-2) # was 1e-4 from paper
     parser.add_argument('--topk', type=float, default=0.2)
-    parser.add_argument('--sparsity', type=float, default=0.2)
+    parser.add_argument('--sparsity', type=float, default=0.2) # was 1e-5 from paper
     parser.add_argument('--sigmoid_bias', type=float, default=2.0)
-    parser.add_argument('--l1_strength', type=float, default=0.0)
+    parser.add_argument('--l1_strength', type=float, default=1.0)
 
-    # FedAcg args
+    # Extra momentum args
+    parser.add_argument("--prox_momentum", type=float, default=0.9)
     parser.add_argument("--acg_momentum", type=float, default=0.1)
 
     return parser.parse_args()
@@ -154,9 +156,10 @@ class Localiser(nn.Module):
                 n_graft_params += frac.sum()
                 self.params[name].data.add_(frac * (finetensor - pretensor))
 
-                # Count bytes sent for this layer (mask + delta)
-                total_bytes += frac.numel() * frac.element_size()  # mask
-                total_bytes += (finetensor - pretensor).numel() * (finetensor - pretensor).element_size()  # delta
+                # Estimate acive bytes sent for this layer (mask + delta)
+                active = torch.round(frac).nonzero().size(0)
+                total_bytes += active * frac.element_size()  # mask
+                total_bytes += active * (finetensor - pretensor).element_size()  # delta
 
         if return_mask:
             return binary_mask, n_graft_params / self.num_params, total_bytes
@@ -210,8 +213,6 @@ class Localiser(nn.Module):
 
                 self.model.zero_grad()
 
-            print("2Task vector norms:", [tv.norm().item() for tv in self.task_vectors])
-
             total_grad = [g / len(dataloader) for g in total_grad]
             self.reset_model()
 
@@ -225,16 +226,16 @@ class Localiser(nn.Module):
 
             # Evaluation of current mask
             if (epoch + 1) % 5 == 0 or epoch == self.graft_args.graft_epochs - 1:
-                mask, proportion = self.interpolate_model(round_=True, return_mask=True)
+                mask, proportion, total_bytes = self.interpolate_model(round_=True, return_mask=True)
                 acc = self.evaluate(dataloader)
                 self.reset_model()
 
-        final_mask, proportion = self.interpolate_model(round_=True, return_mask=True)
+        final_mask, proportion, total_bytes = self.interpolate_model(round_=True, return_mask=True)
         self.reset_model()
 
         print("Mask parameter norms:", [p.norm().item() for p in self.mask])
 
-        return final_mask, proportion, acc
+        return final_mask, proportion, acc, total_bytes
 
 
 class Stitcher(nn.Module):
@@ -302,9 +303,10 @@ class Stitcher(nn.Module):
                     delta = (finetensor - pretensor) * client_mask[idx].to(self.device)
                     self.params[name].data.add_(delta)
 
-                    # Count bytes for delta and mask
-                    total_bytes += delta.numel() * delta.element_size()
-                    total_bytes += client_mask[idx].numel() * client_mask[idx].element_size()
+                    # Estimate active bytes for delta and mask
+                    active = client_mask[idx].nonzero().size(0)
+                    total_bytes += active * delta.element_size()
+                    total_bytes += active * client_mask[idx].element_size()
 
         return self.model, total_bytes  
 
@@ -317,25 +319,7 @@ def FedACG_lookahead(model: nn.Module, prev_global_state: dict, acg_momentum: fl
         IEEE, pp. 12385-12394. Available at: https://doi.org/10.1109/CVPR52733.2024.01177.
     """
     lookahead_model = copy.deepcopy(model)
-    for k, v in lookahead_model.state_dict().items():
-        v_prev = prev_global_state[k]
-        v.data += acg_momentum * (v.data - v_prev.data)
+    for (name, param) in lookahead_model.named_parameters():
+        prev_param = prev_global_state[name]
+        param.data += acg_momentum * (param.data - prev_param.data)
     return lookahead_model
-
-def average_fedft_weights(weights):
-    """ Implementation of FedFT based on the paper:
-        Palihawadana, C. et al. (2024) 'FedFT: Improving Communication Performance for Federated Learning 
-        with Frequency Space Transformation'. arXiv. Available at: https://doi.org/10.48550/arXiv.2409.05242.
-    """
-    
-    pass
-
-def average_feddyn_weights(weights):
-    """ Implementation of FedDyn based on the paper:
-        Jin, C. et al. (2023) 'FedDyn: A dynamic and efficient federated distillation approach on Recommender 
-        System', in 2022 IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS). 
-        2022 IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS), pp. 786-793. 
-        Available at: https://doi.org/10.1109/ICPADS56603.2022.00107.
-    """
-    
-    pass
