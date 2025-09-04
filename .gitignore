@@ -2,6 +2,7 @@ __pycache__/
 myenv/
 results/
 results2/
+results3/
 data/
 .python-version
 fed_job.sh
