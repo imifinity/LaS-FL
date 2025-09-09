@@ -1,19 +1,21 @@
+import argparse
+from datetime import datetime
 import copy
+import glob
 import numpy as np
 import os
 import pandas as pd
+from sklearn.metrics import precision_score, recall_score, f1_score
 import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Any, Dict, List, Optional, Tuple
-from utils import arg_parser
 
-import argparse
 from data import load_datasets, FederatedSampler
 from models import ResNet
-from utils import average_weights, Localiser, Stitcher, FedACG_lookahead
+from utils import arg_parser, average_weights, FedACG_lookahead, FedACG_aggregate, FedDyn_aggregate, Localiser, Stitcher
 
 
 class FedAlg():
@@ -37,22 +39,22 @@ class FedAlg():
         )
 
         if self.args.dataset == "CIFAR10":
+            self.n_classes = 10
 
-            if self.args.model_name == "cnn":
-                self.root_model = CNN().to(self.device)
-            elif self.args.model_name == "resnet18":
-                self.root_model = ResNet(depth=18, n_classes=10).to(self.device)
+            if self.args.model_name == "resnet18":
+                self.root_model = ResNet(depth=18, n_classes=self.n_classes).to(self.device)
             elif self.args.model_name == "resnet50":
-                self.root_model = ResNet(depth=50, n_classes=10).to(self.device)
+                self.root_model = ResNet(depth=50, n_classes=self.n_classes).to(self.device)
             else:
                 raise ValueError(f"Invalid model name, {self.args.model_name}")
 
         elif self.args.dataset == "TinyImageNet":
+            self.n_classes = 200
 
             if self.args.model_name == "resnet18":
-                self.root_model = ResNet(depth=18, n_classes=200, pretrained=True).to(self.device)
+                self.root_model = ResNet(depth=18, n_classes=self.n_classes, pretrained=True).to(self.device)
             elif self.args.model_name == "resnet50":
-                self.root_model = ResNet(depth=50, n_classes=200, pretrained=True).to(self.device)
+                self.root_model = ResNet(depth=50, n_classes=self.n_classes, pretrained=True).to(self.device)
             else:
                 raise ValueError(f"Invalid model name, {self.args.model_name}")
 
@@ -72,6 +74,10 @@ class FedAlg():
         )
 
         self.reached_target_at = None  # type: int
+    
+    def _flatten_state_dict(self, state_dict):
+        # Flatten a state_dict into a 1D tensor with consistent ordering
+        return torch.cat([param.view(-1) for _, param in state_dict.items()])
 
     def _get_data(
         self, root: str, n_clients: int, dir_alpha: float, non_iid: int
@@ -116,14 +122,6 @@ class FedAlg():
         model = copy.deepcopy(root_model)
         model.train()
         
-        # FedDyn - initialise alpha
-        if self.args.algorithm == "feddyn":
-            if not hasattr(self, "client_alphas"):
-                self.client_alphas = [None] * self.args.n_clients
-            if self.client_alphas[client_idx] is None:
-                self.client_alphas[client_idx] = [torch.zeros_like(p) for p in model.parameters()]
-            alpha = self.client_alphas[client_idx]
-        
         optimizer = torch.optim.SGD(
             model.parameters(), lr=self.args.lr, momentum=self.args.momentum
         )
@@ -146,25 +144,22 @@ class FedAlg():
 
                 # FedDyn - dynamic regularisation
                 """ Code based on the paper:
-                Jin, C. et al. (2023) 'FedDyn: A dynamic and efficient federated distillation approach on Recommender 
-                System', in 2022 IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS). 2022 
-                IEEE 28th International Conference on Parallel and Distributed Systems (ICPADS), pp. 786-793. 
-                Available at: https://doi.org/10.1109/ICPADS56603.2022.00107.
+                Acar, D.A.E. et al. (2021) 'Federated Learning Based on Dynamic Regularization'. arXiv. 
+                Available at: https://doi.org/10.48550/arXiv.2111.04263.
                 """
                 if self.args.algorithm == "feddyn":
-                    # Dynamic term: <theta, alpha>
-                    dynamic_loss = sum((p * a).sum() for p, a in zip(model.parameters(), alpha))
-                    
-                    # Optional proximal term (like FedProx)
-                    mu = getattr(self.args, "mu", 0.0)
-                    if mu > 0:
-                        global_params = [p.clone().detach() for p in root_model.parameters()]
-                        prox_loss = (mu / 2) * sum(((p - p0)**2).sum() for p, p0 in zip(model.parameters(), global_params))
-                    else:
-                        prox_loss = 0.0
-                    
-                    loss = loss + dynamic_loss + prox_loss
-                
+                    # Flatten client model, server model, and history using state_dict
+
+                    p_vec = self._flatten_state_dict(model.state_dict())
+                    s_vec = self._flatten_state_dict(root_model.state_dict())
+                    h_vec = self._flatten_state_dict(self.histories[client_idx])
+
+                    dynamic_loss = (
+                        0.5 * self.args.alpha * (p_vec**2).sum()
+                        - self.args.alpha * (p_vec * (s_vec - h_vec)).sum()
+                    )
+                    loss = loss + dynamic_loss
+
                 # FedProx - add proximal term
                 """ Code based on the paper:
                 Yuan, X.-T. and Li, P. (2022) 'On Convergence of FedProx: Local Dissimilarity Invariant Bounds, 
@@ -188,19 +183,12 @@ class FedAlg():
             epoch_loss /= idx
             epoch_acc = epoch_correct / epoch_samples
 
-            # FedDyn - update alpha
-            if self.args.algorithm == "feddyn":
-                with torch.no_grad():
-                    for i, p in enumerate(model.parameters()):
-                        alpha[i] = alpha[i] - (p - list(root_model.parameters())[i]) / self.args.n_clients
-
             print(f"Client #{client_idx} | Epoch: {epoch+1}/{self.args.n_client_epochs} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc*100:.4f}%")
             
         return model, epoch_loss / self.args.n_client_epochs
 
     def train(self) -> None:
         """Train a server model."""
-        train_losses = []
         
         t0 = time.perf_counter()
 
@@ -208,9 +196,58 @@ class FedAlg():
         if self.args.algorithm == "fedacg":
             self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
 
-        comm_bytes = []
+        # Initialize FedDyn histories
+        if self.args.algorithm == "feddyn":
+            # Each client's history corresponds to a correction vector
+            self.histories = [
+                {k: torch.zeros_like(v) for k, v in self.root_model.state_dict().items()}
+                for _ in range(self.args.n_clients)
+            ]
 
-        for epoch in range(self.args.n_epochs):
+        # Pattern to find existing folders for this experiment signature
+        pattern = f"checkpoints/{self.args.algorithm}_{self.args.dataset}_seed{self.args.seed}_*"
+        existing_folders = glob.glob(pattern)
+
+        if existing_folders:
+            # Resume from the most recent experiment folder
+            checkpoint_dir = max(existing_folders, key=os.path.getctime)
+            print(f"Found existing experiment folder: {checkpoint_dir}")
+
+            # Look for checkpoint files in that folder
+            checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "checkpoint_epoch*.pt"))
+            if checkpoint_files:
+                latest_ckpt = max(checkpoint_files, key=os.path.getctime)
+                ckpt = torch.load(latest_ckpt, map_location=self.device)
+                print(f"Resuming from checkpoint: {latest_ckpt}")
+
+                # Load server model
+                self.root_model.load_state_dict(ckpt["model_state_dict"])
+
+                # Load other state
+                train_losses = ckpt["train_losses"]
+                comm_bytes = ckpt.get("comm_bytes", [])
+                self.prev_global_state = ckpt.get("prev_global_state", None)
+                if hasattr(self, "optimizer") and ckpt.get("optimizer_state_dict") is not None:
+                    self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                start_epoch = ckpt["epoch"]
+            else:
+                # No checkpoint in folder → start fresh
+                print("No checkpoint found in folder, starting from scratch")
+                train_losses = []
+                comm_bytes = []
+                start_epoch = 0
+        else:
+            # No existing folder → start fresh
+            exp_name = f"{self.args.algorithm}_{self.args.dataset}_seed{self.args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            checkpoint_dir = os.path.join("checkpoints", exp_name)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            print(f"Starting new experiment, checkpoints will be saved in: {checkpoint_dir}")
+            
+            train_losses = []
+            comm_bytes = []
+            start_epoch = 0
+
+        for epoch in range(start_epoch, self.args.n_epochs):
             t1 = time.perf_counter()
 
             print(f"\nRound {epoch+1}/{self.args.n_epochs}\n")
@@ -294,61 +331,85 @@ class FedAlg():
                     clients_losses.append(client_loss)
 
                 # Update server model based on clients models
-                if self.args.algorithm in ["fedavg", "fedprox", "fedacg", "feddyn"]:
+                if self.args.algorithm in ["fedavg", "fedprox"]:
                     updated_weights, total_bytes = average_weights(clients_models)
+
+                elif self.args.algorithm == "feddyn":
+                    updated_weights, self.histories, total_bytes = feddyn_aggregate(
+                        local_weights=clients_models,
+                        global_weights=self.root_model.state_dict(),
+                        histories=self.histories,
+                        selected_clients=idx_clients,
+                        alpha=self.args.alpha
+                    )
+
+                elif self.args.algorithm == "fedacg":
+                    updated_weights, total_bytes = FedACG_aggregate(sending_model, clients_models)
+                    self.prev_global_state = copy.deepcopy(updated_weights)
+
                 else:
                     raise ValueError(f"Invalid algorithm name, {self.args.algorithm}")
 
             # Update the server model
             self.root_model.load_state_dict(updated_weights)
 
-            # FedAcg only - compute local deltas relative to what clients received
-            if self.args.algorithm == "fedacg":
-                clients_deltas = []
-                sending_state = sending_model.state_dict()
-                for client_state in clients_models:
-                    delta = {k: client_state[k] - sending_state[k] for k in sending_state}
-                    clients_deltas.append(delta)
-                # Update previous global state for next FedACG lookahead
-                self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
-
             # Update average loss of this round
-            avg_loss = sum(clients_losses) / len(clients_losses)
-            train_losses.append(avg_loss)
+            train_loss = sum(clients_losses) / len(clients_losses)
+            train_losses.append(train_loss)
+            avg_train_loss = sum(train_losses) / len(train_losses)
 
-            if (epoch + 1) % self.args.log_every == 0:
-                # Test server model
-                total_loss, total_acc = self.validate()
-                avg_train_loss = sum(train_losses) / len(train_losses)
+            # Test server model
+            val_loss, val_acc = self.validate()
+ 
+            # Early stopping
+            if val_acc >= self.target_acc and self.reached_target_at is None:
+                self.reached_target_at = epoch
+                print(f"\n -----> Target accuracy {self.target_acc*100}% reached at round {epoch}! <----- \n")
 
-                # Log results
-                logs = {
-                    "train/loss": avg_train_loss,
-                    "val/loss": total_loss,
-                    "val/acc": total_acc,
-                    "round": epoch,
+            # Print results
+            print(f"\nResults after {epoch + 1} rounds of training:")
+            print(f"---> Avg Training Loss: {avg_train_loss:.4f}")
+            print(f"---> Avg Val Loss: {val_loss:.4f} | Avg Val Accuracy: {val_acc*100:.4f}%")
+            print(f"---> Communication loss (bytes): {total_bytes}")
+
+            comm_bytes.append(total_bytes)
+
+            t2 = time.perf_counter()
+            print(f"---> Training time: {(t2-t1):.3f} seconds")
+
+            # Early stopping
+            if self.args.early_stopping and self.reached_target_at is not None:
+                print(f"\nEarly stopping at round #{epoch+1}...")
+                break
+
+            # Log every n epochs
+            n = self.args.log
+            if (epoch + 1) % n == 0:
+                checkpoint = {
+                    "epoch": epoch + 1,
+                    "model_state_dict": self.root_model.state_dict(),
+                    "train_losses": train_losses,
+                    "comm_bytes": comm_bytes,
+                    "optimizer_state_dict": getattr(self, "optimizer", None),
+                    "prev_global_state": getattr(self, "prev_global_state", None),
                 }
-                if total_acc >= self.target_acc and self.reached_target_at is None:
-                    self.reached_target_at = epoch
-                    logs["reached_target_at"] = self.reached_target_at
-                    print(f"\n -----> Target accuracy {self.target_acc*100}% reached at round {epoch}! <----- \n")
+                torch.save(checkpoint, os.path.join(checkpoint_dir, f"checkpoint_epoch{epoch+1}.pt"))
+                print(f"\nCheckpoint saved at epoch {epoch+1}")
 
-                # Print results
-                print(f"\nResults after {epoch + 1} rounds of training:")
-                print(f"---> Avg Training Loss: {avg_train_loss:.4f}")
-                print(f"---> Avg Val Loss: {total_loss:.4f} | Avg Val Accuracy: {total_acc*100:.4f}%")
-                print(f"Communication loss (bytes): {total_bytes}")
+            # Log metrics for analysis
+            metrics_path = os.path.join(checkpoint_dir, "metrics.csv")
+            results = {
+                "epoch": epoch + 1,
+                "train_loss": train_loss if train_losses else None,
+                "val_loss": val_loss,
+                "val_acc": val_acc
+            }
 
-                comm_bytes.append(total_bytes)
-
-                t2 = time.perf_counter()
-                print(f"Round {epoch+1} took {(t2-t1):.3f} seconds")
-
-                # Early stopping
-                if self.args.early_stopping and self.reached_target_at is not None:
-                    print(f"\nEarly stopping at round #{epoch+1}...")
-                    break
-
+            pd.DataFrame([results]).to_csv(metrics_path,
+                                            mode='a',
+                                            header=not os.path.exists(metrics_path),
+                                            index=False)
+            
         t3 = time.perf_counter()
 
         self.train_time = round(t3 - t0, 3)
@@ -356,7 +417,9 @@ class FedAlg():
        
         self.avg_comm_bytes = round(np.mean(comm_bytes), 3)
         print(f"Average communication loss per epoch: {self.avg_comm_bytes}bytes\n")
-    
+
+        return train_losses, checkpoint_dir
+        
     def validate(self) -> Tuple[float, float]:
         """Validate the server model.
 
@@ -397,6 +460,8 @@ class FedAlg():
         total_loss = 0.0
         total_correct = 0.0
         total_samples = 0
+        all_preds = []
+        all_targets = []
 
         with torch.no_grad():
             for data, target in self.test_loader:
@@ -406,43 +471,44 @@ class FedAlg():
                 loss = F.cross_entropy(logits, target)
 
                 total_loss += loss.item()
-                total_correct += (logits.argmax(dim=1) == target).sum().item()
+                preds = logits.argmax(dim=1)
+                total_correct += (preds == target).sum().item()
                 total_samples += data.size(0)
+
+                all_preds.extend(preds.cpu().numpy())
+                all_targets.extend(target.cpu().numpy())
 
         # calculate average accuracy and loss
         avg_loss = total_loss / total_samples
         avg_acc = total_correct / total_samples
 
-        # Log results
-        logs = {
-            "test/loss": avg_loss,
-            "test/acc": avg_acc
-        }
+        # calculate precision, recall, f1
+        precision = precision_score(all_targets, all_preds, average='macro')
+        recall = recall_score(all_targets, all_preds, average='macro')
+        f1 = f1_score(all_targets, all_preds, average='macro')
 
         # Print results to CLI
         print("Test results:")
         print(f"---> Avg Test Loss: {avg_loss:.4f} | Avg Test Accuracy: {avg_acc*100:.4f}%\n")
 
-        # Write results to CSV file
+        # Log metrics for analysis
+        results_path = "results.csv"
         results = {
             "method": self.args.algorithm,
             "dataset": self.args.dataset,
             "model": self.args.model_name,
             "rounds": self.args.n_epochs,
             "accuracy": avg_acc,
-            "loss": avg_loss,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
             "communication": self.avg_comm_bytes,
             "train_time": self.train_time
         }
 
-        # Convert to dataframe
-        results_df = pd.DataFrame([results])
-
-        # File to save results
-        r_filename = "experiment_results.csv"
-
-        # Append if file exists, otherwise create new file with header
-        if os.path.isfile(r_filename):
-            df.to_csv(r_filename, mode='a', header=False, index=False)
-        else:
-            df.to_csv(r_filename, index=False)
+        pd.DataFrame([results]).to_csv(results_path,
+                                        mode='a',
+                                        header=not os.path.exists(results_path),
+                                        index=False)
+        
+        print(f"\nResults saved to {results_path}")

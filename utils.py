@@ -20,6 +20,8 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--algorithm", type=str, default="fedavg")
     parser.add_argument("--dataset", type=str, default="CIFAR10")
     parser.add_argument("--model_name", type=str, default="cnn")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--log", type=int, default=5)
 
     # Fed args
     parser.add_argument("--non_iid", type=int, default=1)  # 0: IID, 1: Non-IID
@@ -46,9 +48,10 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--sigmoid_bias', type=float, default=2.0)
     parser.add_argument('--l1_strength', type=float, default=1.0)
 
-    # Extra momentum args
+    # Extra args for baselines
     parser.add_argument("--prox_momentum", type=float, default=0.9)
     parser.add_argument("--acg_momentum", type=float, default=0.1)
+    parser.add_argument("--alpha", type=float, default=0.1)
 
     return parser.parse_args()
 
@@ -71,6 +74,115 @@ def average_weights(weights):
         total_bytes += weights_avg[key].numel() * weights_avg[key].element_size() * len(weights)
 
     return weights_avg, total_bytes
+
+""" 
+Implementation of FedAcg based on the paper:
+Kim, G., Kim, J. and Han, B. (2024) 'Communication-Efficient Federated Learning with Accelerated 
+Client Gradient', in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). 
+2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), Seattle, WA, USA: 
+IEEE, pp. 12385-12394. Available at: https://doi.org/10.1109/CVPR52733.2024.01177.
+"""
+
+def FedACG_lookahead(model: nn.Module, prev_global_state: dict, acg_momentum: float) -> nn.Module:
+    """ 
+    Compute lookahead model
+
+    Args:
+        model (nn.Module): 
+        prev_global_state (dict):
+        acg_momentum (float):
+
+    Returns:
+        lookahead_model (nn.Module): The new lookahead model sent to clients.
+    """
+    lookahead_model = copy.deepcopy(model)
+
+    for (name, param) in lookahead_model.named_parameters():
+        prev_param = prev_global_state[name]
+        param.data += acg_momentum * (param.data - prev_param.data)
+
+    return lookahead_model
+
+
+def FedACG_aggregate(sending_model: nn.Module, clients_models: list[dict]) -> tuple[dict, int]:
+    """
+    Aggregate client updates for FedACG.
+
+    Args:
+        sending_model (nn.Module): The lookahead model sent to clients.
+        clients_models (list[dict]): List of client state_dicts after local training.
+
+    Returns:
+        updated_weights (dict): The new global model weights.
+        total_bytes (int): Total communication in bytes (server->clients + clients->server).
+    """
+    sending_state = sending_model.state_dict()
+
+    # Compute deltas relative to the lookahead model
+    clients_deltas = [
+        {k: client_state[k] - sending_state[k] for k in sending_state}
+        for client_state in clients_models
+    ]
+
+    # Aggregate deltas (element-wise mean)
+    aggregated_delta = {}
+    for k in sending_state: 
+        if clients_deltas[0][k].dtype in (torch.float32, torch.float64):
+            aggregated_delta[k] = torch.mean(torch.stack([delta[k] for delta in clients_deltas]), dim=0)
+        else:
+            aggregated_delta[k] = clients_deltas[0][k]  # just take first client's value
+
+    # Compute updated global weights
+    updated_weights = {k: sending_state[k] + aggregated_delta[k] for k in sending_state}
+
+    # Compute communication bytes
+    lookahead_bytes = sum(param.numel() * param.element_size() for param in sending_model.parameters())
+    deltas_bytes = sum(sum(d.numel() * d.element_size() for d in delta.values()) for delta in clients_deltas)
+    total_bytes = lookahead_bytes + deltas_bytes
+
+    return updated_weights, total_bytes
+
+
+def FedDyn_aggregate(local_weights, global_weights, histories, selected_clients, alpha):
+    """ Code based on the paper:
+        Acar, D.A.E. et al. (2021) 'Federated Learning Based on Dynamic Regularization'. arXiv. 
+        Available at: https://doi.org/10.48550/arXiv.2111.04263.
+    """
+    # Average local client models
+    avg_weights = copy.deepcopy(local_weights[0])
+    for key in avg_weights.keys():
+        for i in range(1, len(local_weights)):
+            avg_weights[key] += local_weights[i][key]
+        avg_weights[key] /= len(local_weights)
+
+    # Update client histories
+    for i, client_idx in enumerate(selected_clients):
+        for key in global_weights.keys():
+            histories[client_idx][key] += (local_weights[i][key] - global_weights[key])
+
+    # Compute mean of histories
+    hist_mean = {k: torch.zeros_like(v) for k, v in global_weights.items()}
+    num_hist = 0
+    for h in histories:
+        if h is not None:
+            for key in h.keys():
+                hist_mean[key] += h[key]
+            num_hist += 1
+    if num_hist > 0:
+        for key in hist_mean.keys():
+            hist_mean[key] /= num_hist
+
+    # Compute new global weights
+    new_global_weights = copy.deepcopy(global_weights)
+    for key in new_global_weights.keys():
+        new_global_weights[key] = avg_weights[key] + hist_mean[key]
+
+    # Calculate communication cost
+    total_bytes = 0
+    for key in new_global_weights.keys():
+        total_bytes += new_global_weights[key].numel() * new_global_weights[key].element_size() * len(local_weights)
+
+    return new_global_weights, histories, total_bytes
 
 
 class Localiser(nn.Module):
@@ -309,17 +421,3 @@ class Stitcher(nn.Module):
                     total_bytes += active * client_mask[idx].element_size()
 
         return self.model, total_bytes  
-
-
-def FedACG_lookahead(model: nn.Module, prev_global_state: dict, acg_momentum: float) -> nn.Module:
-    """ Implementation of FedAcg based on the paper:
-        Kim, G., Kim, J. and Han, B. (2024) 'Communication-Efficient Federated Learning with Accelerated 
-        Client Gradient', in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). 
-        2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), Seattle, WA, USA: 
-        IEEE, pp. 12385-12394. Available at: https://doi.org/10.1109/CVPR52733.2024.01177.
-    """
-    lookahead_model = copy.deepcopy(model)
-    for (name, param) in lookahead_model.named_parameters():
-        prev_param = prev_global_state[name]
-        param.data += acg_momentum * (param.data - prev_param.data)
-    return lookahead_model
