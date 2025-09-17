@@ -126,6 +126,8 @@ class FedAlg():
             model.parameters(), lr=self.args.lr, momentum=self.args.momentum
         )
 
+        n_batches = len(self.train_loader)
+
         # Store global params for FedProx
         if self.args.algorithm == "fedprox":
             global_params = {k: v.clone().detach().to(self.device) for k, v in root_model.state_dict().items()} 
@@ -175,32 +177,33 @@ class FedAlg():
                 loss.backward()
                 optimizer.step()
 
-                epoch_loss += loss.item()
+                epoch_loss += loss.item() * data.size(0)
                 epoch_correct += (logits.argmax(dim=1) == target).sum().item()
                 epoch_samples += data.size(0)
 
             # Calculate average accuracy and loss
-            epoch_loss /= idx
+            epoch_loss /= epoch_samples
             epoch_acc = epoch_correct / epoch_samples
 
             print(f"Client #{client_idx} | Epoch: {epoch+1}/{self.args.n_client_epochs} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc*100:.4f}%")
             
-        return model, epoch_loss / self.args.n_client_epochs
+        return model, epoch_loss, epoch_acc
 
     def train(self) -> None:
         """Train a server model."""
         
         t0 = time.perf_counter()
 
-        # Initialize previous global state for FedACG
+        # Initialise previous global state for FedACG
         if self.args.algorithm == "fedacg":
             self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
 
-        # Initialize FedDyn histories
+        # Initialise FedDyn histories
         if self.args.algorithm == "feddyn":
             # Each client's history corresponds to a correction vector
+            sd = self.root_model.state_dict()
             self.histories = [
-                {k: torch.zeros_like(v) for k, v in self.root_model.state_dict().items()}
+                {k: torch.zeros(v.size(), dtype=torch.float32, device=self.device) for k, v in sd.items()}
                 for _ in range(self.args.n_clients)
             ]
 
@@ -225,15 +228,33 @@ class FedAlg():
 
                 # Load other state
                 train_losses = ckpt["train_losses"]
+                train_accs = ckpt["train_accs"]
+                #val_losses = ckpt["val_losses"]
+                #val_accs = ckpt["val_accs"]
                 comm_bytes = ckpt.get("comm_bytes", [])
                 self.prev_global_state = ckpt.get("prev_global_state", None)
                 if hasattr(self, "optimizer") and ckpt.get("optimizer_state_dict") is not None:
                     self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
                 start_epoch = ckpt["epoch"]
+
+                # Trim csv file so it only has rows <= start_epoch
+                metrics_path = os.path.join(checkpoint_dir, f"{self.args.algorithm}_metrics.csv")
+                if os.path.exists(metrics_path):
+                    df = pd.read_csv(metrics_path)
+                    df = df[df["epoch"] <= start_epoch]
+                    df.to_csv(metrics_path, index=False)
+                    print(f"Trimmed metrics.csv to {len(df)} rows (up to epoch {start_epoch})")
+
+                val_losses = []
+                val_accs = []
+
             else:
                 # No checkpoint in folder → start fresh
                 print("No checkpoint found in folder, starting from scratch")
                 train_losses = []
+                train_accs = []
+                val_losses = []
+                val_accs = []
                 comm_bytes = []
                 start_epoch = 0
         else:
@@ -244,6 +265,9 @@ class FedAlg():
             print(f"Starting new experiment, checkpoints will be saved in: {checkpoint_dir}")
             
             train_losses = []
+            train_accs = []
+            val_losses = []
+            val_accs = []
             comm_bytes = []
             start_epoch = 0
 
@@ -254,6 +278,7 @@ class FedAlg():
 
             clients_models = []
             clients_losses = []
+            clients_accs = []
 
             # Randomly select clients
             m = max(int(self.args.participation * self.args.n_clients), 1)
@@ -266,9 +291,18 @@ class FedAlg():
                     acg_momentum=self.args.acg_momentum
                 )
             else:
-                sending_model = self.root_model
+                sending_model = copy.deepcopy(self.root_model).to(self.device)
+                sending_model.eval()
 
             if self.args.algorithm == "las":
+
+                ##### Testing #####
+                print("=== Round start ===")
+                print("Sending model device:", next(sending_model.parameters()).device)
+                print("Train loader batches:", len(self.train_loader))
+                round_time_start = time.time()
+                ##### Testing #####
+
                 masks = []
                 ft_models = []
                 total_bytes = 0
@@ -283,20 +317,53 @@ class FedAlg():
                     # Set client in the sampler
                     self.train_loader.sampler.set_client(client_idx)
 
+                    # BEFORE training this client
+                    before_root = {n: p.detach().cpu().clone() for n, p in sending_model.named_parameters()}
+
+                    # local debug: record a couple of scalar summaries of the root model
+                    first_name = list(before_root.keys())[0]
+                    last_name = list(before_root.keys())[-1]
+                    print(f"Before training client {client_idx}: root first param sum={before_root[first_name].sum().item():.6e}, "
+                        f"root last param sum={before_root[last_name].sum().item():.6e}")
+
+                    t_client_start = time.perf_counter()
+
                     # Train client
-                    client_model, client_loss = self._train_client(
+                    client_model, client_loss, client_acc = self._train_client(
                         root_model=sending_model,
                         train_loader=self.train_loader,
                         client_idx=client_idx,
                     )
 
+                    t_client_end = time.perf_counter()
+
+                    # AFTER training: compare root -> client
+                    after_client = {n: p.detach().cpu().clone() for n, p in client_model.named_parameters()}
+
+                    # compute L1 difference between root(before) and client(after)
+                    param_l1_diff_root_to_client = 0.0
+                    for n in before_root.keys():
+                        if n in after_client:
+                            param_l1_diff_root_to_client += (before_root[n] - after_client[n]).abs().sum().item()
+
+                    # Also compute L1 difference between client after and itself re-loaded (sanity check)
+                    # and small per-layer sums to see where changes happen
+                    first_after = after_client[first_name].sum().item()
+                    last_after = after_client[last_name].sum().item()
+
+                    print(f"Client {client_idx} train wall-time: {(t_client_end - t_client_start):.4f}s")
+                    print(f"Client {client_idx} param L1 diff (root_before -> client_after): {param_l1_diff_root_to_client:.6e}")
+                    print(f"Client {client_idx} returned loss: {client_loss:.6e}, client first param sum={first_after:.6e}, client last param sum={last_after:.6e}")
+
+
                     clients_models.append(client_model.state_dict())
                     clients_losses.append(client_loss)
+                    clients_accs.append(client_acc)
                     ft_models.append(client_model)
 
                     localiser = Localiser(
                             trainable_params=dict(client_model.named_parameters()),
-                            model=sending_model.eval(),
+                            model=sending_model,
                             pretrained_model=self.pretrained_model,
                             finetuned_model=client_model,
                             graft_args=self.graft_args
@@ -313,29 +380,42 @@ class FedAlg():
                     masks=masks)
 
                 stitched_model, bytes_stitcher = stitcher.interpolate_models()
-                total_bytes += bytes_stitcher
+                stitched_model.to(self.device)
 
+                for name, param in stitched_model.named_parameters():
+                    print(f"{name}: {param.norm().item():.6f}")
+
+                total_bytes += bytes_stitcher
                 updated_weights = stitched_model.state_dict()
+
+                ##### Testing #####
+                round_time_end = time.time()
+                print(f"Round time (s): {round_time_end - round_time_start:.4f}")
+                # quick param-norm of global model
+                global_norm = sum(p.data.norm().item() for p in sending_model.parameters())
+                print("Global model param norm:", global_norm)
+                ##### Testing #####
 
             else:
                 for client_idx in idx_clients:
                     self.train_loader.sampler.set_client(client_idx)
 
                     # Train client
-                    client_model, client_loss = self._train_client(
+                    client_model, client_loss, client_acc = self._train_client(
                         root_model=sending_model,
                         train_loader=self.train_loader,
                         client_idx=client_idx,
                     )
                     clients_models.append(client_model.state_dict())
                     clients_losses.append(client_loss)
+                    clients_accs.append(client_acc)
 
                 # Update server model based on clients models
                 if self.args.algorithm in ["fedavg", "fedprox"]:
                     updated_weights, total_bytes = average_weights(clients_models)
 
                 elif self.args.algorithm == "feddyn":
-                    updated_weights, self.histories, total_bytes = feddyn_aggregate(
+                    updated_weights, self.histories, total_bytes = FedDyn_aggregate(
                         local_weights=clients_models,
                         global_weights=self.root_model.state_dict(),
                         histories=self.histories,
@@ -351,24 +431,25 @@ class FedAlg():
                     raise ValueError(f"Invalid algorithm name, {self.args.algorithm}")
 
             # Update the server model
+            self.root_model.to(self.device)
             self.root_model.load_state_dict(updated_weights)
 
             # Update average loss of this round
             train_loss = sum(clients_losses) / len(clients_losses)
             train_losses.append(train_loss)
-            avg_train_loss = sum(train_losses) / len(train_losses)
 
-            # Test server model
+            # Update average accs of this round
+            train_acc = sum(clients_accs) / len(clients_accs)
+            train_accs.append(train_acc)
+
+            # Validate server model
             val_loss, val_acc = self.validate()
- 
-            # Early stopping
-            if val_acc >= self.target_acc and self.reached_target_at is None:
-                self.reached_target_at = epoch
-                print(f"\n -----> Target accuracy {self.target_acc*100}% reached at round {epoch}! <----- \n")
+            val_losses.append(val_loss)
+            val_accs.append(val_acc)
 
             # Print results
             print(f"\nResults after {epoch + 1} rounds of training:")
-            print(f"---> Avg Training Loss: {avg_train_loss:.4f}")
+            print(f"---> Avg Train Loss: {train_loss:.4f} | Avg Train Accuracy: {train_acc*100:.4f}%")
             print(f"---> Avg Val Loss: {val_loss:.4f} | Avg Val Accuracy: {val_acc*100:.4f}%")
             print(f"---> Communication loss (bytes): {total_bytes}")
 
@@ -377,11 +458,6 @@ class FedAlg():
             t2 = time.perf_counter()
             print(f"---> Training time: {(t2-t1):.3f} seconds")
 
-            # Early stopping
-            if self.args.early_stopping and self.reached_target_at is not None:
-                print(f"\nEarly stopping at round #{epoch+1}...")
-                break
-
             # Log every n epochs
             n = self.args.log
             if (epoch + 1) % n == 0:
@@ -389,6 +465,9 @@ class FedAlg():
                     "epoch": epoch + 1,
                     "model_state_dict": self.root_model.state_dict(),
                     "train_losses": train_losses,
+                    "train_accs": train_accs,
+                    "val_losses": val_losses,
+                    "val_accs": val_accs,
                     "comm_bytes": comm_bytes,
                     "optimizer_state_dict": getattr(self, "optimizer", None),
                     "prev_global_state": getattr(self, "prev_global_state", None),
@@ -397,12 +476,13 @@ class FedAlg():
                 print(f"\nCheckpoint saved at epoch {epoch+1}")
 
             # Log metrics for analysis
-            metrics_path = os.path.join(checkpoint_dir, "metrics.csv")
+            metrics_path = os.path.join(checkpoint_dir, f"{self.args.algorithm}_metrics.csv")
             results = {
                 "epoch": epoch + 1,
-                "train_loss": train_loss if train_losses else None,
-                "val_loss": val_loss,
-                "val_acc": val_acc
+                "train_losses": train_loss,
+                "train_accs": train_acc,
+                "val_losses": val_loss,
+                "val_accs": val_acc
             }
 
             pd.DataFrame([results]).to_csv(metrics_path,
@@ -418,7 +498,7 @@ class FedAlg():
         self.avg_comm_bytes = round(np.mean(comm_bytes), 3)
         print(f"Average communication loss per epoch: {self.avg_comm_bytes}bytes\n")
 
-        return train_losses, checkpoint_dir
+        return train_losses, val_losses, train_accs, val_accs, checkpoint_dir
         
     def validate(self) -> Tuple[float, float]:
         """Validate the server model.
@@ -433,13 +513,13 @@ class FedAlg():
         total_samples = 0
 
         with torch.no_grad():
-            for idx, (data, target) in enumerate(self.val_loader):
+            for data, target in self.val_loader:
                 data, target = data.to(self.device), target.to(self.device)
 
                 logits = self.root_model(data)
                 loss = F.cross_entropy(logits, target)
 
-                total_loss += loss.item()
+                total_loss += loss.item() * data.size(0)
                 total_correct += (logits.argmax(dim=1) == target).sum().item()
                 total_samples += data.size(0)
 
@@ -492,11 +572,12 @@ class FedAlg():
         print(f"---> Avg Test Loss: {avg_loss:.4f} | Avg Test Accuracy: {avg_acc*100:.4f}%\n")
 
         # Log metrics for analysis
-        results_path = "results.csv"
+        results_path = "more_results.csv"
         results = {
             "method": self.args.algorithm,
             "dataset": self.args.dataset,
             "model": self.args.model_name,
+            "IID": self.args.non_iid,
             "rounds": self.args.n_epochs,
             "accuracy": avg_acc,
             "precision": precision,
