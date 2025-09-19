@@ -18,20 +18,20 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
-def plot_curve(mode, accs, losses, filepath, algorithm):
+def plot_curve(metric, train, val, filepath, algorithm):
 
-    # Plot training loss curve
+    # Plot curves
     plt.figure(figsize=(8, 5))
-    plt.plot(range(1, len(accs) + 1), accs, marker='o')
-    plt.plot(range(1, len(losses) + 1), losses, marker='o')
-    plt.title(f"{algorithm.title()} {mode.title()} Curves")
+    plt.plot(range(1, len(train) + 1), train, marker='o', label='train')
+    plt.plot(range(1, len(val) + 1), val, marker='o', label='validation')
+    plt.title(f"{metric.title()} Curves")
     plt.xlabel("Round (Epoch)")
-    plt.ylabel(f"{mode.title()} metrics")
+    plt.ylabel(metric.title())
     plt.grid(True)
     plt.legend()
     
     # Save plot as PNG file
-    path = os.path.join(filepath, f"{algorithm}_{mode}_curves_{datetime.now().strftime('%S-%M-%H_%d-%m')}.png")
+    path = os.path.join(filepath, f"{algorithm}_{metric}_curves_{datetime.now().strftime('%d-%m_%H-%M-%S')}.png")
     plt.savefig(path)
 
 
@@ -42,7 +42,7 @@ def main():
     # Get args
     args = arg_parser()
     print(args.algorithm + "\n" + args.dataset)
-    print(args.device)
+    print(args.dirichlet)
 
     # Get federated algorithm
     fed_alg = FedAlg(args)
@@ -52,8 +52,8 @@ def main():
     fed_alg.test()
 
     # Plot training and validation curves
-    plot_curve("train", train_accs, train_losses, filename, args.algorithm)
-    plot_curve("val", val_accs, val_losses, filename, args.algorithm)
+    plot_curve("accuracy", train_accs, val_accs, filename, args.algorithm)
+    plot_curve("loss", train_losses, val_losses, filename, args.algorithm)
 
 if __name__ == "__main__":
     main()

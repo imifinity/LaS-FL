@@ -7,6 +7,7 @@ import pandas as pd
 from PIL import Image
 from io import BytesIO
 import os
+import random
 
 
 class CIFAR10Dataset(datasets.CIFAR10):
@@ -18,6 +19,25 @@ class CIFAR10Dataset(datasets.CIFAR10):
                                  (0.2023, 0.1994, 0.2010)),
         ])
         super().__init__(root=root, train=train, download=False, transform=transform)
+
+    def __getitem__(self, index):
+        x, y = self.data[index], self.targets[index]
+        x = self.transform(x)
+        return x, y
+
+class CIFAR10TinyDataset(datasets.CIFAR10):
+    N_CLASSES = 10
+    def __init__(self, root="./data", train=True):
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                 (0.2023, 0.1994, 0.2010)),
+        ])
+        super().__init__(root=root, train=train, download=False, transform=transform)
+
+        indices = random.sample(range(len(self.data)), 100)
+        self.data = self.data[indices]
+        self.targets = [self.targets[i] for i in indices]
 
     def __getitem__(self, index):
         x, y = self.data[index], self.targets[index]
@@ -100,8 +120,11 @@ def load_datasets(dataset="CIFAR10"):
     elif dataset == "TinyImageNet":
         train_ds = TinyImageNetCachedDataset(split="train")
         test_ds    = TinyImageNetCachedDataset(split="val")
-        
 
+    elif dataset == "CIFAR10T":
+        train_ds = CIFAR10TinyDataset(train=True)
+        test_ds    = CIFAR10TinyDataset(train=False)
+        
     else:
         raise ValueError(f"Invalid dataset name, {self.args.dataset}")
 
@@ -120,30 +143,23 @@ def load_datasets(dataset="CIFAR10"):
 
 
 class FederatedSampler(Sampler):
-    def __init__(
-        self,
-        dataset: Sequence,
-        non_iid: int,
-        n_clients: Optional[int] = 100,
-        dir_alpha: Optional[float] = 0.5,
-    ):
+    def __init__(self, dataset, n_clients, dir_alpha):
         """Sampler for federated learning in both iid and non-iid settings.
 
         Args:
             dataset (Sequence): Dataset to sample from.
             non_iid (int): 0: IID, 1: Non-IID
-            n_clients (Optional[int], optional): Number of clients. Defaults to 100.
-            dir_alpha (Optional[int], optional): Dirichlet dist. param. Defaults to 0.5.
+            n_clients (Optional[int], optional): Number of clients.
+            dir_alpha (Optional[int], optional): Dirichlet dist. param.
         """
         self.dataset = dataset
-        self.non_iid = non_iid
         self.n_clients = n_clients
         self.dir_alpha = dir_alpha
 
-        if self.non_iid:
-            self.dict_users = self._sample_non_iid()
-        else:
+        if np.isnan(self.dir_alpha):
             self.dict_users = self._sample_iid()
+        else:
+            self.dict_users = self._sample_non_iid()
 
     def _sample_iid(self) -> Dict[int, List[int]]:
         num_items = len(self.dataset) // self.n_clients
