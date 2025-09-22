@@ -41,6 +41,7 @@ tar -xvzf ./data/cifar-10-python.tar.gz -C ./data/
 Manually download TinyImageNet:
 wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
 unzip tiny-imagenet-200.zip -d ./data/
+then run: python import_tin.py to cache the dataset
 
 The final structure should look like this:
 ```
