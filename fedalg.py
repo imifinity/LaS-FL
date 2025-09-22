@@ -16,7 +16,7 @@ from tqdm import trange, tqdm
 
 from data import load_datasets, FederatedSampler
 from models import ResNet
-from utils import arg_parser, average_weights, FedACG_lookahead, FedACG_aggregate, FedDyn_aggregate, Localiser, Stitcher
+from utils import arg_parser, average_weights, FedACG_lookahead, FedACG_aggregate, Localiser, Stitcher
 
 
 class FedAlg():
@@ -65,19 +65,11 @@ class FedAlg():
 
         self.graft_args = argparse.Namespace(
             device=self.device,
-            topk=self.args.topk,
             graft_lr=self.args.graft_lr,
             graft_epochs=self.args.graft_epochs,
             sparsity=self.args.sparsity,
-            sigmoid_bias=self.args.sigmoid_bias,
             l1_strength=self.args.l1_strength
         )
-
-        self.reached_target_at = None  # type: int
-
-    def _flatten_state_dict(self, state_dict):
-        # Flatten a state_dict into a 1D tensor with consistent ordering
-        return torch.cat([param.view(-1) for _, param in state_dict.items()])
 
     def _get_data(self, root, n_clients, dir_alpha):
         """
@@ -105,9 +97,7 @@ class FedAlg():
 
         return train_loader, val_loader, test_loader
 
-    def _train_client(
-        self, root_model: nn.Module, train_loader: DataLoader, client_idx: int
-    ) -> Tuple[nn.Module, float]:
+    def _train_client(self, root_model, train_loader, client_idx):
         """Train a client model.
 
         Args:
@@ -126,7 +116,7 @@ class FedAlg():
             model.parameters(), lr=self.args.lr, momentum=self.args.momentum
         )
 
-        n_batches = len(self.train_loader)
+        n_batches = len(train_loader) ### was self.train_loader
 
         # Store global params for FedProx
         if self.args.algorithm == "fedprox":
@@ -143,24 +133,6 @@ class FedAlg():
 
                 logits = model(data)
                 loss = F.cross_entropy(logits, target)
-
-                # FedDyn - dynamic regularisation
-                """ Code based on the paper:
-                Acar, D.A.E. et al. (2021) 'Federated Learning Based on Dynamic Regularization'. arXiv. 
-                Available at: https://doi.org/10.48550/arXiv.2111.04263.
-                """
-                if self.args.algorithm == "feddyn":
-                    # Flatten client model, server model, and history using state_dict
-
-                    p_vec = self._flatten_state_dict(model.state_dict())
-                    s_vec = self._flatten_state_dict(root_model.state_dict())
-                    h_vec = self._flatten_state_dict(self.histories[client_idx])
-
-                    dynamic_loss = (
-                        0.5 * self.args.alpha * (p_vec**2).sum()
-                        - self.args.alpha * (p_vec * (s_vec - h_vec)).sum()
-                    )
-                    loss = loss + dynamic_loss
 
                 # FedProx - add proximal term
                 """ Code based on the paper:
@@ -187,26 +159,11 @@ class FedAlg():
             
         return model, epoch_loss, epoch_acc
 
-    def train(self) -> None:
+    def train(self):
         """Train a server model."""
-        
-        t0 = time.perf_counter()
-
-        # Initialise previous global state for FedACG
-        if self.args.algorithm == "fedacg":
-            self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
-
-        # Initialise FedDyn histories
-        if self.args.algorithm == "feddyn":
-            # Each client's history corresponds to a correction vector
-            sd = self.root_model.state_dict()
-            self.histories = [
-                {k: torch.zeros(v.size(), dtype=torch.float32, device=self.device) for k, v in sd.items()}
-                for _ in range(self.args.n_clients)
-            ]
 
         # Pattern to find existing folders for this experiment signature
-        pattern = f"checkpoints3/{self.args.algorithm}_{self.args.dataset}_{self.args.dirichlet}_seed{self.args.seed}_*"
+        pattern = f"checkpoints4/{self.args.algorithm}_{self.args.dataset}_{self.args.dirichlet}_seed{self.args.seed}_*"
         existing_folders = glob.glob(pattern)
 
         if existing_folders:
@@ -227,9 +184,10 @@ class FedAlg():
                 # Load other state
                 train_losses = ckpt["train_losses"]
                 train_accs = ckpt["train_accs"]
-                #val_losses = ckpt["val_losses"]
-                #val_accs = ckpt["val_accs"]
+                val_losses = ckpt["val_losses"]
+                val_accs = ckpt["val_accs"]
                 comm_bytes = ckpt.get("comm_bytes", [])
+                train_times = ckpt.get("train_times", [])
                 self.prev_global_state = ckpt.get("prev_global_state", None)
                 if hasattr(self, "optimizer") and ckpt.get("optimizer_state_dict") is not None:
                     self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -243,9 +201,6 @@ class FedAlg():
                     df.to_csv(metrics_path, index=False)
                     print(f"Trimmed metrics.csv to {len(df)} rows (up to epoch {start_epoch})")
 
-                val_losses = []
-                val_accs = []
-
             else:
                 # No checkpoint in folder → start fresh
                 print("No checkpoint found in folder, starting from scratch")
@@ -254,10 +209,11 @@ class FedAlg():
                 val_losses = []
                 val_accs = []
                 comm_bytes = []
+                train_times = []
                 start_epoch = 0
         else:
             # No existing folder → start fresh
-            exp_name = f"{self.args.algorithm}_{self.args.dataset}_seed{self.args.seed}_{self.args.dirichlet}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            exp_name = f"{self.args.algorithm}_{self.args.dataset}_{self.args.dirichlet}_seed{self.args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             checkpoint_dir = os.path.join("checkpoints3", exp_name)
             os.makedirs(checkpoint_dir, exist_ok=True)
             print(f"Starting new experiment, checkpoints will be saved in: {checkpoint_dir}")
@@ -267,9 +223,19 @@ class FedAlg():
             val_losses = []
             val_accs = []
             comm_bytes = []
+            train_times = []
             start_epoch = 0
 
+        # Initialise previous global state for FedACG
+        if self.args.algorithm == "fedacg":
+            self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
+
+        # Calculate number of clients to sample
+        m = max(int(self.args.participation * self.args.n_clients), 1)
+
+        # Start training
         for epoch in range(start_epoch, self.args.n_epochs):
+
             t1 = time.perf_counter()
 
             print(f"\nRound {epoch+1}/{self.args.n_epochs}\n")
@@ -280,11 +246,10 @@ class FedAlg():
 
             if self.args.algorithm == "las":
                 # Initialise specific las variables
-                client_payloads = []
+                client_masks = []
                 total_bytes = 0
 
             # Randomly select clients
-            m = max(int(self.args.participation * self.args.n_clients), 1)
             idx_clients = np.random.choice(range(self.args.n_clients), m, replace=False)
 
             if self.args.algorithm == "fedacg":
@@ -316,29 +281,27 @@ class FedAlg():
                 if self.args.algorithm == "las":
                     # Train mask and produce masked delta
                     localiser = Localiser(
-                            trainable_params=dict(client_model.named_parameters()),
-                            pretrained_state_dict=sending_model.state_dict(),
-                            finetuned_state_dict=client_model.state_dict(),
+                            trainable_params=dict(self.root_model.named_parameters()),  # use same reference as Stitcher
+                            pretrained_model=sending_model,
+                            finetuned_model=client_model,
                             graft_args=self.graft_args
                         )
 
-                    masked_delta, mask, prop, bytes_this_client = localiser.train_graft(self.train_loader)
-                    total_bytes += bytes_this_client
+                    mask, local_bytes = localiser.get_mask_and_bytes()
 
-                    client_payloads.append({"masked_delta": masked_delta, "mask": mask})
+                    for (old, mask) in zip(client_model, mask_list):
+                        new = old * mask
+                        if not torch.equal(new, old):
+                            print("[DEBUG] Mask changed weights in this layer")
+                        else:
+                            print("[DEBUG] Mask had no effect")
+
+                    client_masks.append(mask)
+                    total_bytes += local_bytes
 
             # Update server model based on clients models
             if self.args.algorithm in ["fedavg", "fedprox"]:
                 updated_weights, total_bytes = average_weights(clients_models)
-
-            elif self.args.algorithm == "feddyn":
-                updated_weights, self.histories, total_bytes = FedDyn_aggregate(
-                    local_weights=clients_models,
-                    global_weights=self.root_model.state_dict(),
-                    histories=self.histories,
-                    selected_clients=idx_clients,
-                    alpha=self.args.alpha
-                )
 
             elif self.args.algorithm == "fedacg":
                 updated_weights, total_bytes = FedACG_aggregate(sending_model, clients_models)
@@ -347,18 +310,15 @@ class FedAlg():
             elif self.args.algorithm == "las":
                 # Server merges masked deltas into global model
                 stitcher = Stitcher(
-                    pretrained_state_dict=sending_model.state_dict(), 
-                    client_payloads=client_payloads)
+                    pretrained_model=sending_model,
+                    client_states=clients_models,
+                    client_masks=client_masks,
+                    trainable_params=dict(self.root_model.named_parameters())
+                )
 
-                # Get stitched trainable parameter
-                stitched_params  = stitcher.get_stitched_state_dict()
-
-                # Server's original state_dict
-                updated_weights = self.root_model.state_dict()
-
-                # Overwrite only the trainable parameters
-                for name, param in stitched_params.items():
-                    updated_weights[name] = param
+                # Get stitched weights
+                updated_model  = stitcher.interpolate()
+                updated_weights = updated_model.state_dict()
 
             else:
                 raise ValueError(f"Invalid algorithm name, {self.args.algorithm}")
@@ -389,7 +349,9 @@ class FedAlg():
             comm_bytes.append(total_bytes)
 
             t2 = time.perf_counter()
-            print(f"---> Training time: {(t2-t1):.3f} seconds")
+            train_time = int(t2-t1)
+            train_times.append(train_time)
+            print(f"---> Training time: {train_time} seconds")
 
             # Log every n epochs
             n = self.args.log
@@ -402,6 +364,7 @@ class FedAlg():
                     "val_losses": val_losses,
                     "val_accs": val_accs,
                     "comm_bytes": comm_bytes,
+                    "train_times": train_times,
                     "optimizer_state_dict": getattr(self, "optimizer", None),
                     "prev_global_state": getattr(self, "prev_global_state", None),
                 }
@@ -423,11 +386,9 @@ class FedAlg():
                                             header=not os.path.exists(metrics_path),
                                             index=False)
             
-        t3 = time.perf_counter()
+        self.avg_train_times = round(np.mean(train_times), 0)
+        print(f"Average train time per epoch: {self.avg_train_times}seconds\n")
 
-        self.train_time = round(t3 - t0, 3)
-        print(f"\nTraining took {self.train_time}seconds\n")
-       
         self.avg_comm_bytes = round(np.mean(comm_bytes), 3)
         print(f"Average communication loss per epoch: {self.avg_comm_bytes}bytes\n")
 
@@ -453,7 +414,8 @@ class FedAlg():
                 loss = F.cross_entropy(logits, target)
 
                 total_loss += loss.item() * data.size(0)
-                total_correct += (logits.argmax(dim=1) == target).sum().item()
+                preds = logits.argmax(dim=1)
+                total_correct += (preds == target).sum().item()
                 total_samples += data.size(0)
 
         # calculate average accuracy and loss
@@ -517,7 +479,7 @@ class FedAlg():
             "recall": recall,
             "f1": f1,
             "communication": self.avg_comm_bytes,
-            "train_time": self.train_time
+            "train_time": self.avg_train_times
         }
 
         pd.DataFrame([results]).to_csv(results_path,

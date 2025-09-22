@@ -33,15 +33,13 @@ def arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n_client_epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--optim", type=str, default="sgd")
-    parser.add_argument("--lr", type=float, default=0.0005)
+    parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--momentum", type=float, default=0.9)
 
     # LaS args
     parser.add_argument('--graft_epochs', type=int, default=20) # was 10 from paper
     parser.add_argument('--graft_lr', type=float, default=1e-2) # was 1e-4 from paper
-    parser.add_argument('--topk', type=float, default=0.2)
-    parser.add_argument('--sparsity', type=float, default=0.2) # was 1e-5 from paper
-    parser.add_argument('--sigmoid_bias', type=float, default=2.0)
+    parser.add_argument('--sparsity', type=float, default=0.8) # was 1e-5 from paper
     parser.add_argument('--l1_strength', type=float, default=1.0)
 
     # Extra args for baselines
@@ -137,212 +135,6 @@ def FedACG_aggregate(sending_model: nn.Module, clients_models: list[dict]) -> tu
     total_bytes = lookahead_bytes + deltas_bytes
 
     return updated_weights, total_bytes
-
-
-def FedDyn_aggregate(local_weights, global_weights, histories, selected_clients, alpha):
-    """
-    FedDyn aggregation function based on Acar et al., 2021.
-    """
-
-    # Ensure global weights are float and record their device
-    global_weights_float = {k: v.float() for k, v in global_weights.items()}
-    gw_device = next(iter(global_weights_float.values())).device
-
-    # Average local client models (per-key)
-    avg_weights = {k: v.float().clone().to(gw_device) for k, v in local_weights[0].items()}
-    for key in avg_weights.keys():
-        for i in range(1, len(local_weights)):
-            avg_weights[key] += local_weights[i][key].float().to(gw_device)
-        avg_weights[key] /= float(len(local_weights))
-
-    # Update client histories: h_i <- h_i + (w_i - w)
-    for i, client_idx in enumerate(selected_clients):
-        # Create history if missing (float, on correct device)
-        if histories[client_idx] is None:
-            histories[client_idx] = {k: torch.zeros(v.size(), dtype=torch.float32, device=gw_device)
-                                     for k, v in global_weights_float.items()}
-        else:
-            # Ensure dtype and device match global_weights_float
-            for key in global_weights_float.keys():
-                h_tensor = histories[client_idx][key]
-                if h_tensor.dtype != torch.float32 or h_tensor.device != gw_device:
-                    histories[client_idx][key] = h_tensor.to(device=gw_device).float()
-
-        # Now safe to add
-        for key in global_weights_float.keys():
-            histories[client_idx][key] += (local_weights[i][key].float().to(gw_device) - global_weights_float[key])
-
-    # Compute mean of histories (per-key)
-    hist_mean = {k: torch.zeros_like(v, dtype=torch.float32, device=gw_device) for k, v in global_weights_float.items()}
-    num_hist = 0
-    for h in histories:
-        if h is not None:
-            for key in h.keys():
-                hist_mean[key] += h[key]
-            num_hist += 1
-    if num_hist > 0:
-        for key in hist_mean.keys():
-            hist_mean[key] /= float(num_hist)
-
-    # Compute new global weights
-    new_global_weights = {k: (avg_weights[k] + hist_mean[k]).to(gw_device) for k in avg_weights.keys()}
-
-    # Estimate communication cost
-    total_bytes = 0
-    for key in new_global_weights.keys():
-        total_bytes += new_global_weights[key].numel() * new_global_weights[key].element_size() * len(local_weights)
-
-    return new_global_weights, histories, total_bytes
-
-
-
-# class Localiser(nn.Module):
-#     """ Implementation of Localise-and-Stitch based on the paper:
-#         He, Y. et al. (2024) 'Localize-and-Stitch: Efficient Model Merging via Sparse Task Arithmetic'. arXiv. 
-#         Available at: https://doi.org/10.48550/arXiv.2408.13656.
-#     """
-
-#     def __init__(self, trainable_params, model, pretrained_model, finetuned_model, graft_args):
-#         super(Localiser, self).__init__()
-#         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-#         self.params = {k: p.to(self.device) for k, p in trainable_params.items()}
-#         self.model = copy.deepcopy(model).to(self.device).eval()
-#         self.pretrained = copy.deepcopy(pretrained_model).to(self.device).eval()
-#         self.finetuned = copy.deepcopy(finetuned_model).to(self.device).eval()
-#         self.graft_args = graft_args
-        
-#         for p in self.pretrained.parameters():
-#             p.requires_grad = False
-#         for p in self.finetuned.parameters():
-#             p.requires_grad = False
-
-#         self.trainable_name = list(self.params.keys())
-#         self.task_vectors = [(dict(self.finetuned.named_parameters())[n] -
-#                               dict(self.pretrained.named_parameters())[n]).detach()
-#                              for n in self.trainable_name]
-
-#         self.num_params = sum(p.numel() for p in self.task_vectors)
-#         self.create_basepatch()
-
-#     def reset_model(self):
-#         with torch.no_grad():
-#             for name in self.trainable_name:
-#                 pretensor = dict(self.pretrained.named_parameters())[name].to(self.device)
-#                 self.params[name].data.copy_(pretensor)  
-
-#     def create_basepatch(self):
-#         # top-k sparsity mask
-#         abs_tv = torch.cat([torch.abs(tv).view(-1) for tv in self.task_vectors])
-#         k = int(self.graft_args.sparsity * abs_tv.numel())
-#         topk_values, _ = torch.topk(abs_tv, k)
-#         threshold = topk_values[-1]
-
-#         self.mask = []
-#         for tv in self.task_vectors:
-#             mask = torch.where(torch.abs(tv) > threshold,
-#                                torch.full_like(tv, self.graft_args.sigmoid_bias),
-#                                torch.full_like(tv, -self.graft_args.sigmoid_bias))
-#             self.mask.append(mask.to(self.device))
-
-#     def interpolate_model(self, round_=False, return_mask=False):  
-#         sigmoid = torch.nn.Sigmoid()
-#         binary_mask = []
-#         total_bytes = 0
-
-#         self.reset_model()
-
-#         with torch.no_grad():
-#             for i, name in enumerate(self.trainable_name):
-#                 pretensor = dict(self.pretrained.named_parameters())[name].to(self.device)
-#                 finetensor = dict(self.finetuned.named_parameters())[name].to(self.device)
-
-#                 frac = sigmoid(self.mask[i])
-#                 if round_:
-#                     frac = torch.round(frac)
-#                     binary_mask.append(frac)
-
-#                 delta = (finetensor - pretensor) * frac
-#                 self.params[name].data.copy_(pretensor + delta)
-#                 self.model.state_dict()[name].copy_(pretensor + delta)
-
-#                 active = frac.nonzero().size(0)
-#                 total_bytes += active * delta.element_size()
-#                 total_bytes += active * frac.element_size()
-
-#         if return_mask:
-#             return binary_mask, sum(frac.sum() for frac in self.mask) / self.num_params, total_bytes
-#         else:
-#             return sum(frac.sum() for frac in self.mask) / self.num_params, total_bytes
-
-#     def evaluate(self, dataloader):
-#         self.model.eval()
-#         correct, total = 0, 0
-
-#         with torch.no_grad():
-#             for x, y in dataloader:
-#                 x = x.to(self.device)
-#                 y = y.to(self.device)
-#                 outputs = self.model(x)
-#                 preds = outputs.argmax(dim=1)
-#                 correct += (preds == y).sum().item()
-#                 total += y.size(0)
-
-#         return correct / total
-
-#     def train_graft(self, dataloader):
-#         loss_fct = nn.CrossEntropyLoss()
-#         sigmoid = torch.nn.Sigmoid()
-#         lr = self.graft_args.graft_lr
-
-#         print("Grafting", end="")
-
-#         for epoch in range(self.graft_args.graft_epochs):
-#             print("|", end="")
-#             total_grad = None
-#             self.interpolate_model(round_=False)  # prepares model for grafting
-
-#             for x, y in dataloader:
-#                 x = x.to(self.device)
-#                 y = y.to(self.device)
-#                 outputs = self.model(x)
-#                 loss = loss_fct(outputs, y)
-#                 loss.backward()
-                
-#                 grad = [p.grad.detach().clone() for n, p in self.model.named_parameters()
-#                         if n in self.trainable_name]
-#                 grad = [g * tv.to(self.device) for g, tv in zip(grad, self.task_vectors)]
-
-#                 if total_grad is None:
-#                     total_grad = [lr * g for g in grad]
-#                 else:
-#                     total_grad = [tg + lr * g for tg, g in zip(total_grad, grad)]
-
-#                 self.model.zero_grad()
-
-#             total_grad = [g / len(dataloader) for g in total_grad]
-#             self.reset_model()
-
-#             with torch.no_grad():
-#                 for i in range(len(self.mask)):
-#                     p = self.mask[i]
-#                     g = total_grad[i]
-#                     deriv = sigmoid(p) * (1 - sigmoid(p))
-#                     reg_term = self.graft_args.l1_strength * torch.where(p > 0, deriv, -deriv)
-#                     p -= g * deriv - reg_term
-
-#             # Evaluation of current mask
-#             if (epoch + 1) % 5 == 0 or epoch == self.graft_args.graft_epochs - 1:
-#                 mask, proportion, total_bytes = self.interpolate_model(round_=True, return_mask=True)
-#                 acc = self.evaluate(dataloader)
-#                 self.reset_model()
-
-#         final_mask, proportion, total_bytes = self.interpolate_model(round_=True, return_mask=True)
-#         self.reset_model()
-
-#         print("\n Finished grafting")
-
-#         return final_mask, proportion, acc, total_bytes
 
 
 class Localiser2(nn.Module):
@@ -633,7 +425,7 @@ class Stitcher2(nn.Module):
 
 
 
-class Localiser(nn.Module):
+class Localiser_old(nn.Module):
     """FL-compatible Localise-and-Stitch Localiser for a single client (state-dict/delta version)."""
 
     def __init__(self, trainable_params, pretrained_state_dict, finetuned_state_dict, graft_args):
@@ -683,8 +475,14 @@ class Localiser(nn.Module):
             masked_delta[name] = delta
 
             active = frac.nonzero().size(0)
-            total_bytes += active * delta.element_size()
-            total_bytes += active * frac.element_size()
+            bytes_deltas = active * 4   # float32
+            bytes_mask   = active * 1   # binary mask
+
+            # Debug info #############################
+            # print(f"[DEBUG] {name}: active={active}/{delta.numel()} "
+            #     f"({100*active/delta.numel():.2f}% kept), "
+            #     f"bytes={bytes_deltas+bytes_mask}")
+            ##########################################
 
         prop = sum(frac.sum() for frac in self.mask) / self.num_params
         if return_mask:
@@ -734,7 +532,7 @@ class Localiser(nn.Module):
 
 
 
-class Stitcher:
+class Stitcher_old:
     """Combine masked deltas from clients into a global model (FL-safe)."""
 
     def __init__(self, pretrained_state_dict, client_payloads):
@@ -743,7 +541,7 @@ class Stitcher:
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.pretrained = {k: v.to(self.device).clone() for k, v in pretrained_state_dict.items()}
-        self.trainable_names = [k for k, v in pretrained_state_dict.items() if v.requires_grad]
+        self.trainable_names = [k for k in pretrained_state_dict.keys() if "num_batches_tracked" not in k ] # skip BN bookkeeping
 
         # Compute layer-wise average mask
         num_layers = len(client_payloads[0]["mask"])
@@ -765,7 +563,167 @@ class Stitcher:
         for name in self.trainable_names:
             self.agg_delta[name] /= len(client_payloads)
 
+        # Debug: norms and mask fractions ############################
+        total_norm = sum(torch.norm(v).item() for v in self.agg_delta.values())
+        print(f"[Stitcher] Aggregate delta norm: {total_norm:.4f}")
+        for i, (name, delta) in enumerate(self.agg_delta.items()):
+            if i < 5:  # don’t spam too much
+                print(f"[Stitcher] {name}: delta norm={torch.norm(delta):.4f}, "
+                      f"mask_fraction={self.masks[i].mean().item():.4f}")
+        ##############################################################
+
     def get_stitched_state_dict(self):
         """Return stitched global state dict."""
         stitched = {name: self.pretrained[name] + self.agg_delta[name] for name in self.trainable_names}
+
+        # Debug: stitched vs pretrained distance ############################
+        diffs = [torch.norm(stitched[n] - self.pretrained[n]).item() for n in self.trainable_names]
+        if len(diffs)==0: a = None
+        else: a = round(sum(diffs)/len(diffs), 4)
+        print(f"[Stitcher] Mean param update norm: {a}")
+        ##############################################################
+
         return stitched
+
+
+
+
+
+
+class Localiser(nn.Module):
+    """
+    Learns a binary mask selecting important parameter deltas between pretrained and finetuned models.
+    Adapted for federated learning: no eval loop or classifier head.
+    """
+
+    def __init__(self, trainable_params, pretrained_model, finetuned_model, graft_args):
+        super(Localiser, self).__init__()
+        self.params = trainable_params                     # dict(name -> Parameter)
+        self.pretrained_model = pretrained_model
+        self.finetuned_model = finetuned_model
+        self.graft_args = graft_args
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pretrained_model.to("cpu")
+        self.finetuned_model.to("cpu")
+
+        for param in self.pretrained_model.parameters():
+            param.requires_grad = False
+        for param in self.finetuned_model.parameters():
+            param.requires_grad = False
+
+        # Names in a fixed order
+        self.trainable_names = list(self.params.keys())
+
+        # Pre-compute task vectors (delta finetuned - pretrained)
+        self.task_vectors = self._compute_task_vectors()
+
+        # Initialise mask
+        self.mask = self._create_basepatch()
+
+    def _compute_task_vectors(self):
+        """Compute delta between finetuned and pretrained params for trainable layers."""
+        task_vectors = []
+        pre_state = self.pretrained_model.state_dict()
+        fine_state = self.finetuned_model.state_dict()
+
+        for name in self.trainable_names:
+            pre_tensor = pre_state[name].detach().to(self.device)
+            fine_tensor = fine_state[name].detach().to(self.device)
+            task_vectors.append(fine_tensor - pre_tensor)
+        return task_vectors
+
+    # def _create_basepatch(self):
+    #     """Select top-k parameters as mask per-layer based on task vector magnitude."""
+    #     basepatch = []
+    #     for p in self.task_vectors:
+    #         abs_p = torch.abs(p).view(-1)
+    #         k = max(1, int(self.graft_args.sparsity * abs_p.numel()))
+    #         values, _ = torch.topk(abs_p, k)
+    #         threshold = values.min()
+
+    #         q = torch.zeros_like(p, device=self.device)
+    #         q[torch.abs(p) > threshold] = self.graft_args.sigmoid_bias
+    #         q[torch.abs(p) <= threshold] = -self.graft_args.sigmoid_bias
+    #         basepatch.append(q)
+
+    #     return basepatch
+
+    def _create_basepatch(self):
+        """Create a sparsity mask for conv/linear weights, keep BN/bias/classifier dense."""
+        basepatch = []
+        for i, p in enumerate(self.task_vectors):
+            # Always keep 1D params (bias, BN, etc.)
+            if p.dim() == 1 or i in {159, 160}:  # skip classifier (adjust indices if needed)
+                q = torch.ones_like(p, device=self.device)  # keep all
+            else:
+                # Flatten weights and compute threshold per-layer
+                abs_p = torch.abs(p).view(-1)
+                k = max(1, int(self.graft_args.sparsity * abs_p.numel()))
+                values, _ = torch.topk(abs_p, k)
+                threshold = values.min()
+
+                # Build binary mask: keep large weights, prune small ones
+                q = torch.zeros_like(p, device=self.device)
+                q[torch.abs(p) > threshold] = 1.0  # keep
+
+            basepatch.append(q)
+
+        return basepatch
+
+    def get_mask_and_bytes(self, round_=True):
+        """Return binary mask list (aligned with trainable_names) + comm cost in bytes."""
+        sigmoid = torch.nn.Sigmoid()
+        masks = []
+        total_bits = 0
+
+        for m in self.mask:
+            frac = sigmoid(m)
+            if round_:
+                frac = torch.round(frac)
+            frac = frac.to(self.device)
+            masks.append(frac)
+
+            # count bits (binary mask -> 1 bit per param)
+            total_bits += frac.numel()
+
+        total_bytes = total_bits / 8
+        return masks, total_bytes
+
+
+class Stitcher(nn.Module):
+    """
+    Combines local client updates using masks.
+    """
+
+    def __init__(self, pretrained_model, client_states, client_masks, trainable_params):
+        super(Stitcher, self).__init__()
+        self.pretrained_model = pretrained_model          # nn.Module
+        self.client_states = client_states                # list of state_dicts
+        self.client_masks = client_masks                  # list of mask lists
+        self.params = trainable_params                    # dict(name -> Parameter)
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pretrained_model.to(self.device)
+
+    def interpolate(self):
+        """Aggregate masked deltas from client state_dicts into a new global model."""
+        # deep copy ensures identical arch + params
+        model = copy.deepcopy(self.pretrained_model).to(self.device)
+        trainable_names = list(self.params.keys())
+
+        for idx, name in enumerate(trainable_names):
+            pre_tensor = self.pretrained_model.state_dict()[name].to(self.device)
+            agg_delta = torch.zeros_like(pre_tensor)
+
+            for client_state, masks in zip(self.client_states, self.client_masks):
+                fine_tensor = client_state[name].to(self.device)
+                mask = masks[idx].to(self.device)
+                agg_delta += mask * (fine_tensor - pre_tensor)
+
+            agg_delta /= len(self.client_states)
+
+            with torch.no_grad():
+                model.state_dict()[name].copy_(pre_tensor + agg_delta)
+
+        return model

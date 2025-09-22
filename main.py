@@ -1,6 +1,3 @@
-from utils import arg_parser
-from fedalg import FedAlg
-
 from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,6 +5,9 @@ import random
 import torch
 import os
 
+from utils import arg_parser
+# from fedalg import FedAlg
+from fedlas import FedAlg
 
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -49,7 +49,7 @@ def main():
 
     # Train and test the algorithm
     train_losses, val_losses, train_accs, val_accs, filename = fed_alg.train()
-    fed_alg.test()
+    fed_alg.evaluate(split="test")
 
     # Plot training and validation curves
     plot_curve("accuracy", train_accs, val_accs, filename, args.algorithm)

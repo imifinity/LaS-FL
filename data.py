@@ -10,7 +10,7 @@ import os
 import random
 
 
-class CIFAR10Dataset(datasets.CIFAR10):
+class CIFAR10Dataset(datasets.CIFAR10): # CIFAR10
     N_CLASSES = 10
     def __init__(self, root="./data", train=True):
         transform = transforms.Compose([
@@ -25,7 +25,7 @@ class CIFAR10Dataset(datasets.CIFAR10):
         x = self.transform(x)
         return x, y
 
-class CIFAR10TinyDataset(datasets.CIFAR10):
+class CIFAR10TinyDataset(datasets.CIFAR10): # CIFAR10T
     N_CLASSES = 10
     def __init__(self, root="./data", train=True):
         transform = transforms.Compose([
@@ -35,7 +35,7 @@ class CIFAR10TinyDataset(datasets.CIFAR10):
         ])
         super().__init__(root=root, train=train, download=False, transform=transform)
 
-        indices = random.sample(range(len(self.data)), 100)
+        indices = random.sample(range(len(self.data)), 1000)
         self.data = self.data[indices]
         self.targets = [self.targets[i] for i in indices]
 
@@ -44,57 +44,7 @@ class CIFAR10TinyDataset(datasets.CIFAR10):
         x = self.transform(x)
         return x, y
 
-
-class TinyImageNetDataset:
-    N_CLASSES = 200
-    def __init__(self, root_dir="/users/adgs945/sharedscratch/tiny-imagenet-200", split='train'):
-        self.split = split
-        self.root_dir = os.path.join(root_dir, split)
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4802, 0.4481, 0.3975),
-                                 (0.2302, 0.2265, 0.2262)),
-        ])
-
-        self.samples = []
-        self.targets = []
-
-        if split == 'train':
-            for class_folder in os.listdir(self.root_dir):
-                class_path = os.path.join(self.root_dir, class_folder, 'images')
-                for img_file in os.listdir(class_path):
-                    self.samples.append(os.path.join(class_path, img_file))
-                    self.targets.append(class_folder)
-
-        elif split == 'val':
-            val_ann_path = os.path.join(self.root_dir, 'val_annotations.txt')
-            with open(val_ann_path, 'r') as f:
-                lines = f.readlines()
-            img_to_label = {line.split('\t')[0]: line.split('\t')[1] for line in lines}
-            for img_file, label in img_to_label.items():
-                self.samples.append(os.path.join(self.root_dir, 'images', img_file))
-                self.targets.append(label)
-
-        else:
-            raise ValueError("Split must be 'train' or 'val'")
-
-        # Convert string labels to integers
-        self.class_to_idx = {cls_name: idx for idx, cls_name in enumerate(sorted(set(self.targets)))}
-        self.targets = [self.class_to_idx[t] for t in self.targets]
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, index):
-        img_path = self.samples[index]
-        img = Image.open(img_path).convert('RGB')
-
-        x = self.transform(img)
-        y = self.targets[index]
-        return x, y
-
-
-class TinyImageNetCachedDataset(Dataset):
+class TinyImageNetCachedDataset(Dataset): # TinyImageNet
     def __init__(self, data_dir="./data", split="train"):
         cache_file = os.path.join(data_dir, f"tinyimagenet_{split}_cache.pt")
         if not os.path.exists(cache_file):
@@ -139,7 +89,6 @@ def load_datasets(dataset="CIFAR10"):
     )
 
     return train_ds, val_ds, test_ds
-
 
 
 class FederatedSampler(Sampler):
