@@ -18,14 +18,14 @@ pip install -r requirements.txt
 # Project Structure
 ```
 .
-├── main.py # Entry point, parses args & starts training and evaluates result
-├── fedalg.py # Federated learning training loop with a test function included
-├── utils.py # Argument parser, and aggregation algorithms for: FedAvg, FedProx, FedACG, and LaS
-├── models.py # ResNet18/ResNet50 architectures
-├── data.py # Data loading & preprocessing
-├── requirements.txt # Dependencies
-├── scripts/ # SLURM job scripts
-├── data/ # Empty - all data for CIFAR10 and TinyImageNet to be downloaded here
+├── main.py             # Entry point, parses args & starts training and evaluates result
+├── fedalg.py           # Federated learning training loop with a test function included
+├── utils.py            # Argument parser, and aggregation algorithms for: FedAvg, FedProx, FedACG, and LaS
+├── models.py           # ResNet18/ResNet50 architectures
+├── data.py             # Data loading & preprocessing
+├── requirements.txt    # Dependencies
+├── scripts/            # SLURM job scripts
+├── data/               # Empty - all data for CIFAR10 and TinyImageNet to be downloaded here
 ├── extra/
 │ └── import_TIN.py
 └── README.md
