@@ -1,7 +1,6 @@
 import torch.nn as nn
 import torchvision.models as models
 
-
 class ResNet(nn.Module):
     """
     ResNet wrapper for CIFAR-10 and Tiny-ImageNet.
