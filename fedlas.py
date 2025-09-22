@@ -1,4 +1,3 @@
-import argparse
 from datetime import datetime
 import copy
 import glob
@@ -8,16 +7,14 @@ import pandas as pd
 from sklearn.metrics import precision_score, recall_score, f1_score
 import time
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import Any, Dict, List, Optional, Tuple
-from tqdm import trange, tqdm
+from tqdm import tqdm
 
 from data import load_datasets, FederatedSampler
 from models import ResNet
-from utils import arg_parser, average_weights, FedACG_lookahead, FedACG_aggregate
-from fedalg_las import Localiser, Stitcher
+from utils import average_weights, FedACG_lookahead, FedACG_aggregate
+from utils_las import Localiser, Stitcher
 
 
 class FedAlg():
@@ -27,7 +24,7 @@ class FedAlg():
     Available at: https://proceedings.mlr.press/v54/mcmahan17a.html.
     """
 
-    def __init__(self, args: Dict[str, Any]):
+    def __init__(self, args):
         self.args = args
         self.device = torch.device(
             f"cuda:{0}" if torch.cuda.is_available() else "cpu"

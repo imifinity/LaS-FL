@@ -8,15 +8,13 @@ import pandas as pd
 from sklearn.metrics import precision_score, recall_score, f1_score
 import time
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import Any, Dict, List, Optional, Tuple
-from tqdm import trange, tqdm
+from tqdm import tqdm
 
 from data import load_datasets, FederatedSampler
 from models import ResNet
-from utils import arg_parser, average_weights, FedACG_lookahead, FedACG_aggregate, Localiser, Stitcher
+from utils import average_weights, FedACG_lookahead, FedACG_aggregate, Localiser, Stitcher
 
 
 class FedAlg():
@@ -26,7 +24,7 @@ class FedAlg():
     Available at: https://proceedings.mlr.press/v54/mcmahan17a.html.
     """
 
-    def __init__(self, args: Dict[str, Any]):
+    def __init__(self, args):
         self.args = args
         self.device = torch.device(
             f"cuda:{0}" if torch.cuda.is_available() else "cpu"
@@ -35,7 +33,6 @@ class FedAlg():
         self.dirichlet = self.args.dirichlet
 
         self.train_loader, self.val_loader, self.test_loader = self._get_data(
-            root=self.args.data_root,
             n_clients=self.args.n_clients,
             dir_alpha=self.dirichlet
         )
@@ -71,7 +68,7 @@ class FedAlg():
             l1_strength=self.args.l1_strength
         )
 
-    def _get_data(self, root, n_clients, dir_alpha):
+    def _get_data(self, n_clients, dir_alpha):
         """
         Args:
             root (str): path to the dataset.
@@ -97,7 +94,7 @@ class FedAlg():
 
         return train_loader, val_loader, test_loader
 
-    def _train_client(self, root_model, train_loader, client_idx):
+    def _train_client(self, root_model, train_loader):
         """Train a client model.
 
         Args:
@@ -115,8 +112,6 @@ class FedAlg():
         optimizer = torch.optim.SGD(
             model.parameters(), lr=self.args.lr, momentum=self.args.momentum
         )
-
-        n_batches = len(train_loader) ### was self.train_loader
 
         # Store global params for FedProx
         if self.args.algorithm == "fedprox":
@@ -270,8 +265,7 @@ class FedAlg():
                 # Train client locally
                 client_model, client_loss, client_acc = self._train_client(
                     root_model=sending_model,
-                    train_loader=self.train_loader,
-                    client_idx=client_idx,
+                    train_loader=self.train_loader
                 )
 
                 clients_models.append(client_model.state_dict())
@@ -288,14 +282,6 @@ class FedAlg():
                         )
 
                     mask, local_bytes = localiser.get_mask_and_bytes()
-
-                    for (old, mask) in zip(client_model, mask_list):
-                        new = old * mask
-                        if not torch.equal(new, old):
-                            print("[DEBUG] Mask changed weights in this layer")
-                        else:
-                            print("[DEBUG] Mask had no effect")
-
                     client_masks.append(mask)
                     total_bytes += local_bytes
 
@@ -394,7 +380,7 @@ class FedAlg():
 
         return train_losses, val_losses, train_accs, val_accs, checkpoint_dir
         
-    def validate(self) -> Tuple[float, float]:
+    def validate(self):
         """Validate the server model.
 
         Returns:
@@ -424,7 +410,7 @@ class FedAlg():
 
         return avg_loss, avg_acc
 
-    def test(self) -> Tuple[float, float]:
+    def test(self):
         """Test the final model on the held-out test set.
 
         Returns:

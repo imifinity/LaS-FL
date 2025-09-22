@@ -1,11 +1,7 @@
-from typing import Dict, List, Optional, Sequence
 import numpy as np
 import torch
-from torch.utils.data import Dataset, Sampler, random_split, ConcatDataset
+from torch.utils.data import Dataset, Sampler, random_split
 from torchvision import datasets, transforms
-import pandas as pd
-from PIL import Image
-from io import BytesIO
 import os
 import random
 
@@ -76,7 +72,7 @@ def load_datasets(dataset="CIFAR10"):
         test_ds    = CIFAR10TinyDataset(train=False)
         
     else:
-        raise ValueError(f"Invalid dataset name, {self.args.dataset}")
+        raise ValueError(f"Invalid dataset name, {dataset}")
 
     n = len(train_ds)
     n_val = int(0.1 * n)
@@ -110,7 +106,7 @@ class FederatedSampler(Sampler):
         else:
             self.dict_users = self._sample_non_iid()
 
-    def _sample_iid(self) -> Dict[int, List[int]]:
+    def _sample_iid(self):
         num_items = len(self.dataset) // self.n_clients
         dict_users, all_idxs = {}, [i for i in range(len(self.dataset))]
 
@@ -123,7 +119,7 @@ class FederatedSampler(Sampler):
 
         return dict_users
 
-    def _sample_non_iid(self) -> Dict[int, List[int]]:
+    def _sample_non_iid(self):
         if hasattr(self.dataset, 'dataset') and hasattr(self.dataset.dataset, 'targets'):
             all_indices = np.arange(len(self.dataset))
             labels = np.array([self.dataset.dataset.targets[i] for i in all_indices])
