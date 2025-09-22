@@ -8,7 +8,8 @@ results5/
 las_results/
 baseline_iid_results/
 baseline_noniid_results/
-data/
+data/*
+!data/.gitkeep
 checkpoints/
 metrics/
 metrics 2/
