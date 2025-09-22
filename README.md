@@ -16,7 +16,7 @@ Setup environment then install dependencies with:
 pip install -r requirements.txt
 
 # Project Structure
-
+```
 .
 ├── main.py # Entry point, parses args & starts training and evaluates result
 ├── fedalg.py # Federated learning training loop with a test function included
@@ -29,6 +29,7 @@ pip install -r requirements.txt
 ├── extra/
 │ └── import_TIN.py
 └── README.md
+```
 
 # Datasets
 ## CIFAR-10
@@ -42,20 +43,21 @@ wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
 unzip tiny-imagenet-200.zip -d ./data/
 
 The final structure should look like this:
-
+```
 ./data/
 ├── cifar-10-batches-py/
-      ├── batches.meta
-      ├── cifar10.tar.gz
-      ├── data_batch_1
-      ├── data_batch_2
-      ├── data_batch_3
-      ├── data_batch_4
-      ├── data_batch_5
-      ├── readme.html
-      └── test_batch
+│   ├── batches.meta
+│   ├── cifar10.tar.gz
+│   ├── data_batch_1
+│   ├── data_batch_2
+│   ├── data_batch_3
+│   ├── data_batch_4
+│   ├── data_batch_5
+│   ├── readme.html
+│   └── test_batch
 ├── tinyimagenet_train_cache.pt
 └── tinyimagenet_val_cache.pt
+```
 
 # Running the Code
 All args can be found in ./utils.py
