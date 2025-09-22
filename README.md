@@ -79,5 +79,3 @@ sbatch scripts/run_experiment.sh
 On local machines, you can ignore them and just run python main.py ....
 
 Results are written to the output directory specified in your job script.
-
-He, Y. et al. (2024) Localize-and-Stitch: Efficient Model Merging via Sparse Task Arithmetic. arXiv. https://doi.org/10.48550/arXiv.2408.13656
