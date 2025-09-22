@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -D /users/adgs945/Individual_project_code_/
-#SBATCH --job-name EXP_BASELINE                      # Job name
+#SBATCH --job-name RUN_EXP                           # Job name
 #SBATCH --partition=gengpu                           # GPU nodes
 #SBATCH --nodes=1                                    # Single node
 #SBATCH --ntasks-per-node=1                          # Single task per node

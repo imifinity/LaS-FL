@@ -416,7 +416,7 @@ class FedAlg():
             print(f"---> Avg Test Loss: {avg_loss:.4f} | Avg Test Accuracy: {avg_acc*100:.4f}%\n")
 
             # Log metrics for analysis
-            results_path = "final_results copy.csv"
+            results_path = "results.csv"
             results = {
                 "method": self.args.algorithm,
                 "dataset": self.args.dataset,

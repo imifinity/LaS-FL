@@ -52,7 +52,7 @@ def plot_curves(dirichlet, dataset, mode, metric, csv_dir, output_dir):
     plt.grid(True)
 
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, f"{dirichlet}_{dataset}_{col}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
+    path = os.path.join(output_dir, f"{dataset}_{dirichlet}_{col}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
     plt.savefig(path)
     print(f"Plot saved to {path}")
 
