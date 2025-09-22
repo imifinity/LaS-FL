@@ -60,6 +60,17 @@ The final structure should look like this:
 └── tinyimagenet_val_cache.pt
 ```
 
+# Plotting graphs
+Loss and accuracy graphs are automatically plotted and stored in the same folder as the checkpoints (Created upon training).
+There is the option to produce additional graphs by running the following for example:
+
+python plotting.py \
+  --csv_dir [checkpoints folder] \
+  --output_dir [desired folder] \
+  --dirichlet IID \
+  --dataset CIF \
+  --seed 42
+
 # Running the Code
 All args can be found in ./utils.py
 
