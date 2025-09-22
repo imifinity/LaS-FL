@@ -10,50 +10,33 @@ Abstract:
 
 ---
 
-## Requirements
-
-All dependencies are listed in `requirements.txt`.  
-Create a Python virtual environment and install them with:
-
-bash
-python -m venv myenv
-source myenv/bin/activate   # On Linux/Mac
-myenv\Scripts\activate      # On Windows
-
-pip install -r requirements.txt
-
-Localised Model Merging for Federated Learning
-
-This project implements Federated Learning algorithms including FedAvg, FedSoup, and Localise-and-Stitch (LaS), with experiments on CIFAR-10 and TinyImageNet.
-It was developed as part of an MSc dissertation project.
-
-## Requirements
+# Requirements
 
 Setup environment then install dependencies with:
 pip install -r requirements.txt
 
-## Project Structure
+# Project Structure
+
 .
-├── main.py              # Entry point, parses args & starts training and evaluates result
-├── fedalg.py            # Federated learning training loop with a test function included
-├── utils.py             # Argument parser, and aggregation algorithms for: FedAvg, FedProx, FedACG, and LaS
-├── models.py            # ResNet18/ResNet50 architectures
-├── data.py              # Data loading & preprocessing
-├── requirements.txt     # Dependencies
-├── scripts/             # SLURM job scripts
-├── data/                # Empty - all data for CIFAR10 and TinyImageNet to be downloaded here
+├── main.py # Entry point, parses args & starts training and evaluates result
+├── fedalg.py # Federated learning training loop with a test function included
+├── utils.py # Argument parser, and aggregation algorithms for: FedAvg, FedProx, FedACG, and LaS
+├── models.py # ResNet18/ResNet50 architectures
+├── data.py # Data loading & preprocessing
+├── requirements.txt # Dependencies
+├── scripts/ # SLURM job scripts
+├── data/ # Empty - all data for CIFAR10 and TinyImageNet to be downloaded here
 ├── extra/
-      ├── import_TIN.py
-      └── import_TIN.py            
+│ └── import_TIN.py
 └── README.md
 
-## Datasets
-# CIFAR-10
+# Datasets
+## CIFAR-10
 Manually download CIFAR-10 python version:
 wget https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz -O ./data/cifar10/cifar-10-python.tar.gz
 tar -xvzf ./data/cifar-10-python.tar.gz -C ./data/
 
-# TinyImageNet
+## TinyImageNet
 Manually download TinyImageNet:
 wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
 unzip tiny-imagenet-200.zip -d ./data/
@@ -74,29 +57,25 @@ The final structure should look like this:
 ├── tinyimagenet_train_cache.pt
 └── tinyimagenet_val_cache.pt
 
-## Running the Code
+# Running the Code
 All args can be found in ./utils.py
 
-#  Local Execution
+##  Local Execution
 Example (FedAvg on CIFAR-10):
 python main.py --algorithm fedavg --dataset CIFAR10 --dirichlet 0.1 --n_epochs 50 --seed 42
 
-# HPC (SLURM) Execution
+## HPC (SLURM) Execution
 If running on a SLURM-based HPC, use the provided job scripts in ./scripts/.
 
 Example submission:
 sbatch scripts/run_experiment.sh
 
-## Notes
+# Notes
 
 .sh job scripts are included in ./scripts/ for reproducibility on HPC.
 
 On local machines, you can ignore them and just run python main.py ....
 
 Results are written to the output directory specified in your job script.
-
-## Reference
-
-Implementation of Localise-and-Stitch is based on:
 
 He, Y. et al. (2024) Localize-and-Stitch: Efficient Model Merging via Sparse Task Arithmetic. arXiv. https://doi.org/10.48550/arXiv.2408.13656
