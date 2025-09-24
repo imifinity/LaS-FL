@@ -2,11 +2,10 @@ __pycache__/
 myenv/
 data/*
 !data/.gitkeep
-checkpoints/
-slurm_output/
+slurm_jobs/
 .python-version
-run_experiments_las.sh
 all_not_in_use/
 results.csv
-test.sh
-las_experiments.txt
+metrics/
+plots/
+final plots/

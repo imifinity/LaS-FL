@@ -1,476 +1,343 @@
-import argparse
-from datetime import datetime
-import copy
-import glob
-import numpy as np
 import os
-import pandas as pd
-from sklearn.metrics import precision_score, recall_score, f1_score
 import time
+import numpy as np
+import pandas as pd
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from sklearn.metrics import precision_score, recall_score, f1_score
+from copy import deepcopy
 
 from data import load_datasets, FederatedSampler
 from models import ResNet
-from utils import average_weights, FedACG_lookahead, FedACG_aggregate, Localiser, Stitcher
+from utils import set_seed, arg_parser, plot_curve
+from agg_utils import average_weights, FedACG_lookahead, FedACG_aggregate, Localiser, Stitcher
 
 
-class FedAlg():
-    """ Implementation based on code from the paper:
-    McMahan, B. et al. (2017) 'Communication-Efficient Learning of Deep Networks from Decentralized Data', 
-    in Proceedings of the 20th International Conference on Artificial Intelligence and Statistics. Artificial Intelligence and Statistics, PMLR, pp. 1273-1282. 
-    Available at: https://proceedings.mlr.press/v54/mcmahan17a.html.
+def main():
+    set_seed(42)
+    device = "cuda"
+    
+    # Get args
+    args = arg_parser()
+ 
+    dataset = args.dataset
+    model_name = args.model_name
+    dirichlet = args.dirichlet
+    algorithm = args.algorithm
+    
+    print(algorithm + "\n" + dataset)
+    print(dirichlet)
+
+    train_loader, global_train_loader, val_loader, test_loader = get_data(
+        dataset = dataset,
+        n_clients=args.n_clients,
+        dir_alpha=dirichlet,
+        batch_size = args.batch_size
+    )
+
+    if dataset == "CIFAR10" or dataset == "CIFAR10T":
+        n_classes = 10
+
+        if model_name == "resnet18":
+            root_model = ResNet(depth=18, n_classes=n_classes).to(device)
+        elif model_name == "resnet50":
+            root_model = ResNet(depth=50, n_classes=n_classes).to(device)
+        else:
+            raise ValueError(f"Invalid model name, {model_name}")
+
+    elif dataset == "TinyImageNet":
+        n_classes = 200
+
+        if model_name == "resnet18":
+            root_model = ResNet(depth=18, n_classes=n_classes, pretrained=True).to(device)
+        elif model_name == "resnet50":
+            root_model = ResNet(depth=50, n_classes=n_classes, pretrained=True).to(device)
+        else:
+            raise ValueError(f"Invalid model name, {model_name}")
+
+    else:
+        raise ValueError(f"Invalid dataset name, {dataset}")
+
+    global_model, metrics, test_acc, f1, precision, recall = federated_training(
+        root_model,
+        algorithm,
+        train_loader,
+        global_train_loader,
+        val_loader,
+        test_loader,
+        n_clients=args.n_clients,
+        participation=args.participation,
+        rounds=args.n_epochs,
+        prox_mu=args.prox_momentum,
+        local_epochs=args.n_client_epochs,
+        sparsity=args.sparsity,
+        device="cuda",
+        acg_momentum=args.acg_momentum
+    )
+
+    # Log performance metrics
+    os.makedirs("metrics", exist_ok=True)
+    metrics_path = os.path.join("metrics", f"{algorithm}_{dataset}_{dirichlet}_{args.seed}_metrics.csv")
+    metrics_results = {
+        "epoch": np.arange(1, args.n_epochs+1),
+        "train_losses": metrics["train_loss"],
+        "train_accs": metrics["train_acc"],
+        "val_losses": metrics["val_loss"],
+        "val_accs": metrics["val_acc"]
+    }
+
+    pd.DataFrame(metrics_results).to_csv(metrics_path, index=False)
+
+    print(f"\nMetrics saved to {metrics_path}")
+
+    avg_comm_bytes = np.mean(metrics["comm_costs"])
+    avg_train_times = np.mean(metrics["train_times"])
+    
+    # Log results
+    results_path = "results.csv"
+    final_results = {
+        "method": algorithm,
+        "dataset": dataset,
+        "Dirichlet": dirichlet,
+        "rounds": args.n_epochs,
+        "accuracy": test_acc,
+        "f1": f1,
+        "precision": precision,
+        "recall": recall,
+        "communication": avg_comm_bytes,
+        "train_time": avg_train_times
+    }
+
+    pd.DataFrame([final_results]).to_csv(results_path,
+                                    mode='a',
+                                    header=not os.path.exists(results_path),
+                                    index=False)
+    
+    print(f"Results saved to {results_path}")
+
+    # Plot curves
+    os.makedirs("plots", exist_ok=True)
+    path1 = plot_curve(algorithm, dirichlet, args.seed, "accuracy",
+                   metrics["train_acc"], metrics["val_acc"], "plots")
+    path2 = plot_curve(algorithm, dirichlet, args.seed, "loss",
+                    metrics["train_loss"], metrics["val_loss"], "plots")
+
+    print(f"Plots saved to {path1} and {path2}\n")
+
+
+def get_data(dataset, n_clients, dir_alpha, batch_size):
+    """
+    Args:
+        root (str): path to the dataset.
+        n_clients (int): number of clients.
+        dir_alpha (float): Dirichlet distribution parameter.
+
+    Returns:
+        Tuple[DataLoader, DataLoader]: train_loader, test_loader
     """
 
-    def __init__(self, args):
-        self.args = args
-        self.device = torch.device(
-            f"cuda:{0}" if torch.cuda.is_available() else "cpu"
-        )
-
-        self.dirichlet = self.args.dirichlet
-
-        self.train_loader, self.val_loader, self.test_loader = self._get_data(
-            n_clients=self.args.n_clients,
-            dir_alpha=self.dirichlet
-        )
-
-        if self.args.dataset == "CIFAR10" or self.args.dataset == "CIFAR10T":
-            self.n_classes = 10
-
-            if self.args.model_name == "resnet18":
-                self.root_model = ResNet(depth=18, n_classes=self.n_classes).to(self.device)
-            elif self.args.model_name == "resnet50":
-                self.root_model = ResNet(depth=50, n_classes=self.n_classes).to(self.device)
-            else:
-                raise ValueError(f"Invalid model name, {self.args.model_name}")
-
-        elif self.args.dataset == "TinyImageNet":
-            self.n_classes = 200
-
-            if self.args.model_name == "resnet18":
-                self.root_model = ResNet(depth=18, n_classes=self.n_classes, pretrained=True).to(self.device)
-            elif self.args.model_name == "resnet50":
-                self.root_model = ResNet(depth=50, n_classes=self.n_classes, pretrained=True).to(self.device)
-            else:
-                raise ValueError(f"Invalid model name, {self.args.model_name}")
-
-        else:
-            raise ValueError(f"Invalid dataset name, {self.args.dataset}")
-
-        self.graft_args = argparse.Namespace(
-            device=self.device,
-            graft_lr=self.args.graft_lr,
-            graft_epochs=self.args.graft_epochs,
-            sparsity=self.args.sparsity,
-            l1_strength=self.args.l1_strength
-        )
-
-    def _get_data(self, n_clients, dir_alpha):
-        """
-        Args:
-            root (str): path to the dataset.
-            n_clients (int): number of clients.
-            dir_alpha (float): Dirichlet distribution parameter.
-
-        Returns:
-            Tuple[DataLoader, DataLoader]: train_loader, test_loader
-        """
-
-        train_set, val_set, test_set = load_datasets(self.args.dataset)
-
-        sampler = FederatedSampler(
-            train_set, 
-            n_clients=n_clients, 
-            dir_alpha=dir_alpha)
-
-        batch_size = self.args.batch_size
-
-        train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler)
-        val_loader = DataLoader(val_set, batch_size=batch_size)
-        test_loader = DataLoader(test_set, batch_size=batch_size)
-
-        return train_loader, val_loader, test_loader
-
-    def _train_client(self, root_model, train_loader):
-        """Train a client model.
-
-        Args:
-            root_model (nn.Module): server model.
-            train_loader (DataLoader): client data loader.
-            client_idx (int): client index.
-
-        Returns:
-            Tuple[nn.Module, float]: client model, average client loss.
-        """
-
-        model = copy.deepcopy(root_model)
-        model.train()
-        
-        optimizer = torch.optim.SGD(
-            model.parameters(), lr=self.args.lr, momentum=self.args.momentum
-        )
-
-        # Store global params for FedProx
-        if self.args.algorithm == "fedprox":
-            global_params = {k: v.clone().detach().to(self.device) for k, v in root_model.state_dict().items()} 
-
-        for epoch in range(self.args.n_client_epochs):
-            epoch_loss = 0.0
-            epoch_correct = 0
-            epoch_samples = 0
-
-            for idx, (data, target) in enumerate(train_loader):
-                data, target = data.to(self.device), target.to(self.device)
-                optimizer.zero_grad()
-
-                logits = model(data)
-                loss = F.cross_entropy(logits, target)
-
-                # FedProx - add proximal term
-                """ Code based on the paper:
-                Yuan, X.-T. and Li, P. (2022) 'On Convergence of FedProx: Local Dissimilarity Invariant Bounds, 
-                Non-smoothness and Beyond', Advances in Neural Information Processing Systems, 35, pp. 10752-10765.
-                """
-
-                if self.args.algorithm == "fedprox":
-                    prox_loss = 0.0
-                    for (name, param) in model.named_parameters():
-                        prox_loss += ((param - global_params[name].to(param.device)) ** 2).sum()
-                    loss = loss + (self.args.prox_momentum / 2.0) * prox_loss
-
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss += loss.item() * data.size(0)
-                epoch_correct += (logits.argmax(dim=1) == target).sum().item()
-                epoch_samples += data.size(0)
-
-            # Calculate average accuracy and loss
-            epoch_loss /= epoch_samples
-            epoch_acc = epoch_correct / epoch_samples
-            
-        return model, epoch_loss, epoch_acc
-
-    def train(self):
-        """Train a server model."""
-
-        # Pattern to find existing folders for this experiment signature
-        pattern = f"checkpoints4/{self.args.algorithm}_{self.args.dataset}_{self.args.dirichlet}_seed{self.args.seed}_*"
-        existing_folders = glob.glob(pattern)
-
-        if existing_folders:
-            # Resume from the most recent experiment folder
-            checkpoint_dir = max(existing_folders, key=os.path.getctime)
-            print(f"Found existing experiment folder: {checkpoint_dir}")
-
-            # Look for checkpoint files in that folder
-            checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "checkpoint_epoch*.pt"))
-            if checkpoint_files:
-                latest_ckpt = max(checkpoint_files, key=os.path.getctime)
-                ckpt = torch.load(latest_ckpt, map_location=self.device)
-                print(f"Resuming from checkpoint: {latest_ckpt}")
-
-                # Load server model
-                self.root_model.load_state_dict(ckpt["model_state_dict"])
-
-                # Load other state
-                train_losses = ckpt["train_losses"]
-                train_accs = ckpt["train_accs"]
-                val_losses = ckpt["val_losses"]
-                val_accs = ckpt["val_accs"]
-                comm_bytes = ckpt.get("comm_bytes", [])
-                train_times = ckpt.get("train_times", [])
-                self.prev_global_state = ckpt.get("prev_global_state", None)
-                if hasattr(self, "optimizer") and ckpt.get("optimizer_state_dict") is not None:
-                    self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-                start_epoch = ckpt["epoch"]
-
-                # Trim csv file so it only has rows <= start_epoch
-                metrics_path = os.path.join(checkpoint_dir, f"{self.args.algorithm}_metrics.csv")
-                if os.path.exists(metrics_path):
-                    df = pd.read_csv(metrics_path)
-                    df = df[df["epoch"] <= start_epoch]
-                    df.to_csv(metrics_path, index=False)
-                    print(f"Trimmed metrics.csv to {len(df)} rows (up to epoch {start_epoch})")
-
-            else:
-                # No checkpoint in folder → start fresh
-                print("No checkpoint found in folder, starting from scratch")
-                train_losses = []
-                train_accs = []
-                val_losses = []
-                val_accs = []
-                comm_bytes = []
-                train_times = []
-                start_epoch = 0
-        else:
-            # No existing folder → start fresh
-            exp_name = f"{self.args.algorithm}_{self.args.dataset}_{self.args.dirichlet}_seed{self.args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            checkpoint_dir = os.path.join("checkpoints3", exp_name)
-            os.makedirs(checkpoint_dir, exist_ok=True)
-            print(f"Starting new experiment, checkpoints will be saved in: {checkpoint_dir}")
-            
-            train_losses = []
-            train_accs = []
-            val_losses = []
-            val_accs = []
-            comm_bytes = []
-            train_times = []
-            start_epoch = 0
-
-        # Initialise previous global state for FedACG
-        if self.args.algorithm == "fedacg":
-            self.prev_global_state = copy.deepcopy(self.root_model.state_dict())
-
-        # Calculate number of clients to sample
-        m = max(int(self.args.participation * self.args.n_clients), 1)
-
-        # Start training
-        for epoch in range(start_epoch, self.args.n_epochs):
-
-            t1 = time.perf_counter()
-
-            print(f"\nRound {epoch+1}/{self.args.n_epochs}\n")
-
-            clients_models = []
-            clients_losses = []
-            clients_accs = []
-
-            if self.args.algorithm == "las":
-                # Initialise specific las variables
-                client_masks = []
-                total_bytes = 0
-
-            # Randomly select clients
-            idx_clients = np.random.choice(range(self.args.n_clients), m, replace=False)
-
-            if self.args.algorithm == "fedacg":
-                sending_model = FedACG_lookahead(
-                    model=self.root_model,
-                    prev_global_state=self.prev_global_state,
-                    acg_momentum=self.args.acg_momentum
-                )
-            else:
-                sending_model = copy.deepcopy(self.root_model).to(self.device)
-                sending_model.eval()
-
-            # Train individual clients with loading bar
-            for client_idx in tqdm(idx_clients, desc="Training clients"):
-                # Set client in the sampler
-                self.train_loader.sampler.set_client(client_idx)
-
-                # Train client locally
-                client_model, client_loss, client_acc = self._train_client(
-                    root_model=sending_model,
-                    train_loader=self.train_loader
-                )
-
-                clients_models.append(client_model.state_dict())
-                clients_losses.append(client_loss)
-                clients_accs.append(client_acc)
-
-                if self.args.algorithm == "las":
-                    # Train mask and produce masked delta
-                    localiser = Localiser(
-                            trainable_params=dict(self.root_model.named_parameters()),  # use same reference as Stitcher
-                            pretrained_model=sending_model,
-                            finetuned_model=client_model,
-                            graft_args=self.graft_args
-                        )
-
-                    mask, local_bytes = localiser.get_mask_and_bytes()
-                    client_masks.append(mask)
-                    total_bytes += local_bytes
-
-            # Update server model based on clients models
-            if self.args.algorithm in ["fedavg", "fedprox"]:
-                updated_weights, total_bytes = average_weights(clients_models)
-
-            elif self.args.algorithm == "fedacg":
-                updated_weights, total_bytes = FedACG_aggregate(sending_model, clients_models)
-                self.prev_global_state = copy.deepcopy(updated_weights)
-
-            elif self.args.algorithm == "las":
-                # Server merges masked deltas into global model
-                stitcher = Stitcher(
-                    pretrained_model=sending_model,
-                    client_states=clients_models,
-                    client_masks=client_masks,
-                    trainable_params=dict(self.root_model.named_parameters())
-                )
-
-                # Get stitched weights
-                updated_model  = stitcher.interpolate()
-                updated_weights = updated_model.state_dict()
-
-            else:
-                raise ValueError(f"Invalid algorithm name, {self.args.algorithm}")
-
-            # Update the server model
-            self.root_model.to(self.device)
-            self.root_model.load_state_dict(updated_weights)
-
-            # Update average loss of this round
-            train_loss = sum(clients_losses) / len(clients_losses)
-            train_losses.append(train_loss)
-
-            # Update average accs of this round
-            train_acc = sum(clients_accs) / len(clients_accs)
-            train_accs.append(train_acc)
-
-            # Validate server model
-            val_loss, val_acc = self.validate()
-            val_losses.append(val_loss)
-            val_accs.append(val_acc)
-
-            # Print results
-            print(f"\nResults after {epoch + 1} rounds of training:")
-            print(f"---> Avg Train Loss: {train_loss:.4f} | Avg Train Accuracy: {train_acc*100:.4f}%")
-            print(f"---> Avg Val Loss: {val_loss:.4f} | Avg Val Accuracy: {val_acc*100:.4f}%")
-            print(f"---> Communication loss (bytes): {total_bytes}")
-
-            comm_bytes.append(total_bytes)
-
-            t2 = time.perf_counter()
-            train_time = int(t2-t1)
-            train_times.append(train_time)
-            print(f"---> Training time: {train_time} seconds")
-
-            # Log every n epochs
-            n = self.args.log
-            if (epoch + 1) % n == 0:
-                checkpoint = {
-                    "epoch": epoch + 1,
-                    "model_state_dict": self.root_model.state_dict(),
-                    "train_losses": train_losses,
-                    "train_accs": train_accs,
-                    "val_losses": val_losses,
-                    "val_accs": val_accs,
-                    "comm_bytes": comm_bytes,
-                    "train_times": train_times,
-                    "optimizer_state_dict": getattr(self, "optimizer", None),
-                    "prev_global_state": getattr(self, "prev_global_state", None),
-                }
-                torch.save(checkpoint, os.path.join(checkpoint_dir, f"checkpoint_epoch{epoch+1}.pt"))
-                print(f"\nCheckpoint saved at epoch {epoch+1}")
-
-            # Log metrics for analysis
-            metrics_path = os.path.join(checkpoint_dir, f"{self.args.algorithm}_metrics.csv")
-            results = {
-                "epoch": epoch + 1,
-                "train_losses": train_loss,
-                "train_accs": train_acc,
-                "val_losses": val_loss,
-                "val_accs": val_acc
-            }
-
-            pd.DataFrame([results]).to_csv(metrics_path,
-                                            mode='a',
-                                            header=not os.path.exists(metrics_path),
-                                            index=False)
-            
-        self.avg_train_times = round(np.mean(train_times), 0)
-        print(f"Average train time per epoch: {self.avg_train_times}seconds\n")
-
-        self.avg_comm_bytes = round(np.mean(comm_bytes), 3)
-        print(f"Average communication loss per epoch: {self.avg_comm_bytes}bytes\n")
-
-        return train_losses, val_losses, train_accs, val_accs, checkpoint_dir
-        
-    def validate(self):
-        """Validate the server model.
-
-        Returns:
-            Tuple[float, float]: average loss, average accuracy.
-        """
-        self.root_model.eval()
-
-        total_loss = 0.0
-        total_correct = 0.0
-        total_samples = 0
-
-        with torch.no_grad():
-            for data, target in self.val_loader:
-                data, target = data.to(self.device), target.to(self.device)
-
-                logits = self.root_model(data)
-                loss = F.cross_entropy(logits, target)
-
-                total_loss += loss.item() * data.size(0)
-                preds = logits.argmax(dim=1)
-                total_correct += (preds == target).sum().item()
-                total_samples += data.size(0)
-
-        # calculate average accuracy and loss
-        avg_loss = total_loss / total_samples
-        avg_acc = total_correct / total_samples
-
-        return avg_loss, avg_acc
-
-    def test(self):
-        """Test the final model on the held-out test set.
-
-        Returns:
-            Tuple[float, float]: average loss, average accuracy.
-        """
-        self.root_model.eval()
-
-        total_loss = 0.0
-        total_correct = 0.0
-        total_samples = 0
-        all_preds = []
-        all_targets = []
-
-        with torch.no_grad():
-            for data, target in self.test_loader:
-                data, target = data.to(self.device), target.to(self.device)
-
-                logits = self.root_model(data)
-                loss = F.cross_entropy(logits, target)
-
-                total_loss += loss.item()
-                preds = logits.argmax(dim=1)
-                total_correct += (preds == target).sum().item()
-                total_samples += data.size(0)
-
+    train_set, val_set, test_set = load_datasets(dataset)
+
+    sampler = FederatedSampler(
+        train_set, 
+        n_clients=n_clients, 
+        dir_alpha=dir_alpha)
+
+    batch_size = batch_size
+
+    train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler)
+    global_train_loader = DataLoader(train_set, batch_size=batch_size)
+    val_loader = DataLoader(val_set, batch_size=batch_size)
+    test_loader = DataLoader(test_set, batch_size=batch_size)
+
+    return train_loader, global_train_loader, val_loader, test_loader
+
+
+def client_update(model, train_loader, epochs, device, algorithm, global_params=None, prox_mu=None):
+    model = deepcopy(model).to(device)
+    optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    criterion = nn.CrossEntropyLoss()
+
+    model.train()
+    for _ in range(epochs):
+        for x, y in train_loader:
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(x), y)
+
+            # Add FedProx proximal term
+            if algorithm == "fedprox" and global_params is not None:
+                prox_loss = 0.0
+                for (name, param) in model.named_parameters():
+                    prox_loss += ((param - global_params[name].to(param.device)) ** 2).sum()
+                loss += (prox_mu / 2.0) * prox_loss
+
+            loss.backward()
+            optimizer.step()
+
+    return model.state_dict()
+
+
+def evaluate(model, data_loader, device, split):
+    model.eval()
+    criterion = nn.CrossEntropyLoss()
+    total_loss, correct, total = 0.0, 0, 0
+    
+    if split == "test":
+        all_preds, all_labels = [], []
+
+    with torch.no_grad():
+        for x, y in data_loader:
+            x, y = x.to(device), y.to(device)
+            outputs = model(x)
+            loss = criterion(outputs, y)
+            total_loss += loss.item() * y.size(0)
+
+            preds = outputs.argmax(dim=1)
+            correct += (preds == y).sum().item()
+            total += y.size(0)
+
+            if split == "test":
                 all_preds.extend(preds.cpu().numpy())
-                all_targets.extend(target.cpu().numpy())
+                all_labels.extend(y.cpu().numpy())
 
-        # calculate average accuracy and loss
-        avg_loss = total_loss / total_samples
-        avg_acc = total_correct / total_samples
+    avg_loss = total_loss / total
+    acc = round(100.0 * correct / total, 2)
 
-        # calculate precision, recall, f1
-        precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
-        recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
-        f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
-
-        # Print results to CLI
-        print("Test results:")
-        print(f"---> Avg Test Loss: {avg_loss:.4f} | Avg Test Accuracy: {avg_acc*100:.4f}%\n")
-
-        # Log metrics for analysis
-        results_path = "final_results.csv"
-        results = {
-            "method": self.args.algorithm,
-            "dataset": self.args.dataset,
-            "model": self.args.model_name,
-            "Dirichlet": self.dirichlet,
-            "rounds": self.args.n_epochs,
-            "accuracy": avg_acc,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "communication": self.avg_comm_bytes,
-            "train_time": self.avg_train_times
-        }
-
-        pd.DataFrame([results]).to_csv(results_path,
-                                        mode='a',
-                                        header=not os.path.exists(results_path),
-                                        index=False)
+    if split == "test":
+        # Compute precision, recall, F1 (macro average = treats all classes equally)
+        precision = round(100*precision_score(all_labels, all_preds, average="macro", zero_division=0), 2)
+        recall = round(100*recall_score(all_labels, all_preds, average="macro", zero_division=0), 2)
+        f1 = round(100*f1_score(all_labels, all_preds, average="macro", zero_division=0), 2)
         
-        print(f"\nResults saved to {results_path}")
+        return acc, avg_loss, f1, precision, recall
+
+    else:
+        return acc, avg_loss
+
+
+def federated_training(global_model, algorithm, train_loader, global_train_loader, 
+                        val_loader, test_loader, n_clients, rounds, prox_mu, 
+                        participation, local_epochs, sparsity, device, acg_momentum):
+
+    global_model.to(device)
+    pretrained_state = deepcopy(global_model.state_dict())
+
+    # Initialise previous global state for FedACG 
+    if algorithm == "fedacg":
+        prev_global_state = deepcopy(global_model.state_dict())
+
+    m = max(int(participation * n_clients), 1)
+
+    metrics = {
+        "train_acc": [],
+        "train_loss": [],
+        "val_acc": [],
+        "val_loss": [],
+        "comm_costs": [],
+        "train_times": []
+    }
+
+    for r in range(rounds):
+        t1 = time.perf_counter()
+        print(f"\nRound {r+1}/{rounds}")
+
+        # FedACG lookahead
+        if algorithm == "fedacg":
+            global_model = FedACG_lookahead(
+                model=global_model,
+                prev_global_state=prev_global_state,
+                acg_momentum=acg_momentum
+            )
+
+        idx_clients = np.random.choice(range(n_clients), m, replace=False)
+        client_deltas_list, comm = [], 0
+
+        print(f"\nTraining clients", end="")
+
+        for client_idx in idx_clients:
+            print(".", end="")
+            
+            # Point sampler to this client
+            train_loader.sampler.set_client(int(client_idx))
+
+            # Train client locally
+            if algorithm == "fedprox":
+                global_params = deepcopy(global_model.state_dict())
+                client_state = client_update(
+                    global_model, train_loader, local_epochs, device,
+                    algorithm="fedprox", global_params=global_params, prox_mu=prox_mu
+                )
+            else:
+                client_state = client_update(
+                    global_model, train_loader, local_epochs, device,
+                    algorithm=algorithm
+                )
+
+            if algorithm == "las":
+                # Localise deltas
+                localiser = Localiser(pretrained_state, sparsity)
+                _, deltas, calc_comm = localiser.compute_mask_and_deltas(client_state)
+                comm += calc_comm
+                client_deltas_list.append(deltas)
+            else:
+                # Collect full client states
+                client_deltas_list.append(client_state)
+        
+        # Aggregation step
+        if algorithm == "las":
+            # Stitch results into new global state
+            stitcher = Stitcher(pretrained_state)
+            new_global_state = stitcher.stitch(client_deltas_list)
+        elif algorithm in ["fedavg", "fedprox"]:
+            # Average weights
+            new_global_state, comm = average_weights(client_deltas_list)
+        elif algorithm == "fedacg":
+            new_global_state, comm = FedACG_aggregate(global_model, client_deltas_list)
+            prev_global_state = deepcopy(new_global_state)
+        else:
+            raise ValueError(f"Invalid algorithm name, {algorithm}")
+
+        metrics["comm_costs"].append(comm)
+
+        # Update global model
+        global_model.load_state_dict(new_global_state)
+        pretrained_state = deepcopy(new_global_state)
+
+        # Evaluate using train and validation sets
+        train_acc, train_loss = evaluate(global_model, global_train_loader, device, split="train")
+        val_acc, val_loss = evaluate(global_model, val_loader, device, split="val")
+
+        # Print results
+        print(f"\nResults after {r + 1} rounds of training:")
+        print(f"---> Avg Train Loss: {train_loss} | Avg Train Accuracy: {train_acc}%")
+        print(f"---> Avg Val Loss: {val_loss} | Avg Val Accuracy: {val_acc}%")
+        print(f"---> Communication loss (bytes): {comm}")
+
+        # Append metrics to dict
+        metrics["train_acc"].append(train_acc)
+        metrics["train_loss"].append(train_loss)
+        metrics["val_acc"].append(val_acc)
+        metrics["val_loss"].append(val_loss)
+        
+        # Get training time
+        t2 = time.perf_counter()
+        train_time = int(t2-t1)
+        metrics["train_times"].append(train_time)
+        print(f"---> Training time: {train_time} seconds")
+
+    # Final test
+    test_acc, _, f1, precision, recall = evaluate(global_model, test_loader, device, split="test")
+    print("\nTest results:")
+    print(f"---> Accuracy: {test_acc}%")
+    print(f"---> F1 Score: {f1}%")
+    print(f"---> Precision: {precision}%")
+    print(f"---> Recall: {recall}%")
+
+    return global_model, metrics, test_acc, f1, precision, recall
+
+
+if __name__ == "__main__":
+    main()

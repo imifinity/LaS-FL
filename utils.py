@@ -1,73 +1,64 @@
-import copy
+import os
+import random
+import argparse
+import numpy as np
 import torch
-
-class Localiser:
-    def __init__(self, sparsity):
-        self.sparsity = sparsity
-
-    def compute_importance_scores(self, base_model, trained_model):
-        """
-        Compute importance scores for each parameter tensor.
-        Here: |delta| magnitude (simplified).
-        """
-        scores = []
-        for p_base, p_trained in zip(base_model.parameters(), trained_model.parameters()):
-            delta = p_trained.data - p_base.data
-            scores.append(torch.abs(delta))
-        return scores
-
-    def localise(self, base_model, trained_model):
-        """
-        Produce (delta, mask) for a locally trained model.
-        """
-        delta, mask = [], []
-
-        # deltas
-        for p_base, p_trained in zip(base_model.parameters(), trained_model.parameters()):
-            delta.append(p_trained.data - p_base.data)
-
-        # scores + masks
-        scores = self.compute_importance_scores(base_model, trained_model)
-        for score_tensor in scores:
-            k = max(1, int(self.sparsity * score_tensor.numel()))
-            thresh = torch.topk(score_tensor.flatten(), k)[0][-1]
-            mask_tensor = (score_tensor >= thresh).float()
-            mask.append(mask_tensor.view_as(score_tensor))
-
-        return delta, mask
+import matplotlib.pyplot as plt
 
 
-class Stitcher:
-    def __init__(self, conflict_rule="average"):
-        self.conflict_rule = conflict_rule
+def set_seed(seed=42):
+    """Set seeds for reproducibility"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    def stitch(self, base_model, deltas, masks):
-        new_model = copy.deepcopy(base_model)
 
-        with torch.no_grad():
-            for param_idx, p_global in enumerate(base_model.parameters()):
-                contribs = []
-                for delta, mask in zip(deltas, masks):
-                    contribs.append(delta[param_idx] * mask[param_idx])
+def arg_parser() -> argparse.ArgumentParser:
+    """Collect command-line arguments"""
+    parser = argparse.ArgumentParser()
 
-                stacked = torch.stack(contribs, dim=0)
-                selected = (stacked != 0).sum(0)
+    # Mode args
+    parser.add_argument("--data_root", type=str, default="./data/")
+    parser.add_argument("--algorithm", type=str, default="fedavg")
+    parser.add_argument("--dataset", type=str, default="CIFAR10")
+    parser.add_argument("--model_name", type=str, default="resnet50")
+    parser.add_argument("--seed", type=int, default=0)
 
-                if self.conflict_rule == "average":
-                    merged_delta = torch.sum(stacked, dim=0)
-                    merged_delta = torch.where(
-                        selected > 0,
-                        merged_delta / torch.clamp(selected, min=1),
-                        merged_delta,
-                    )
-                elif self.conflict_rule == "sum":
-                    merged_delta = torch.sum(stacked, dim=0)
-                else:
-                    raise ValueError("Unknown conflict rule")
+    # Federation args
+    parser.add_argument("--dirichlet", type=float, default=np.nan)
+    parser.add_argument("--n_clients", type=int, default=20)
+    parser.add_argument("--participation", type=float, default=0.2)
 
-                # inplace update
-                list(new_model.parameters())[param_idx].data = (
-                    p_global.data + merged_delta
-                )
+    # Training args
+    parser.add_argument("--n_epochs", type=int, default=100)
+    parser.add_argument("--n_client_epochs", type=int, default=5)
+    parser.add_argument("--batch_size", type=int, default=64)
 
-        return new_model
+    # Aggregation args 
+    parser.add_argument('--sparsity', type=float, default=0.2)
+    parser.add_argument("--prox_momentum", type=float, default=0.01)
+    parser.add_argument("--acg_momentum", type=float, default=0.1)
+
+    return parser.parse_args()
+
+
+def plot_curve(algorithm, dirichlet, seed, metric, train, val, filepath):
+
+    # Plot curves
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, len(train) + 1), train, marker='o', label='train')
+    plt.plot(range(1, len(val) + 1), val, marker='o', label='validation')
+    plt.title(f"{metric.title()} Curves")
+    plt.xlabel("Round (Epoch)")
+    plt.ylabel(metric.title())
+    plt.grid(True)
+    plt.legend()
+    
+    # Save plot as PNG file
+    path = os.path.join(filepath, f"{algorithm}_{dirichlet}_{seed}_{metric}_curves.png")
+    plt.savefig(path)
+
+    return path
