@@ -26,7 +26,7 @@ pip install -r requirements.txt
 ├── fedalg.py           # Contains multiple functions that train and test the federated learning setup - includes main()
 ├── import_TIN.py       # Imports Tiny-ImageNet and saves a cached version of it in ./data/
 ├── models.py           # ResNet18/ResNet50 architectures
-├── plotting.py            # Plots graphs after experiments have run
+├── plotting.py         # Plots graphs after experiments have run
 ├── plotting.sh         # SLURM script to run plotting.py
 ├── requirements.txt    # Dependencies
 ├── run_experiments.sh  # SLURM script to run fedalg.py
@@ -79,10 +79,7 @@ sbatch scripts/run_experiment.sh
 Loss and accuracy graphs are automatically plotted and stored in ./plots/ after running fedalg.py
 There is the option to produce additional graphs that are stored in ./final plots/ by running the following for example:
 
-python plotting.py \
-  --csv_dir metrics \
-  --output_dir final_plots \
-  --dataset CIFAR10
+python plotting.py --csv_dir metrics --output_dir final_plots --dataset CIFAR10
 
 # Notes
 
