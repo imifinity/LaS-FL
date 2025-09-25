@@ -1,6 +1,3 @@
-CIFAR10 fedprox nan
-CIFAR10 fedprox 1
-CIFAR10 fedprox 0.1
 TinyImageNet fedavg nan
 TinyImageNet fedavg 1
 TinyImageNet fedavg 0.1

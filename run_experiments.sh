@@ -6,9 +6,9 @@
 #SBATCH --ntasks-per-node=1                          # Single task per node
 #SBATCH --cpus-per-task=4                            # 4 CPU cores
 #SBATCH --mem=16GB                                   # 16GB RAM
-#SBATCH --time=4:00:00                               # Time limit
+#SBATCH --time=5:00:00                               # Time limit
 #SBATCH --gres=gpu:1                                 # 1 GPU
-#SBATCH --array=1-15                                 # Number of experiments to run
+#SBATCH --array=1-12                                 # Number of experiments to run
 #SBATCH -e slurm_jobs/%x_%A_%a.e                     # Error logs
 #SBATCH -o slurm_jobs/%x_%A_%a.o                     # Output logs
 
@@ -34,7 +34,7 @@ python3 fedalg.py \
   --dataset $DATASET \
   --algorithm $ALGORITHM \
   --dirichlet $DIR \
-  --n_epochs 100 \
+  --n_epochs 50 \
   --seed 42
 
 echo "Finished task $SLURM_ARRAY_TASK_ID at $(date)"
