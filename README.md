@@ -18,17 +18,19 @@ pip install -r requirements.txt
 # Project Structure
 ```
 .
-├── main.py             # Entry point, parses args & starts training and evaluates result
-├── fedalg.py           # Federated learning training loop with a test function included
-├── utils.py            # Argument parser, and aggregation algorithms for: FedAvg, FedProx, FedACG, and LaS
-├── models.py           # ResNet18/ResNet50 architectures
-├── data.py             # Data loading & preprocessing
-├── requirements.txt    # Dependencies
-├── scripts/            # SLURM job scripts
 ├── data/               # Empty - all data for CIFAR10 and TinyImageNet to be downloaded here
-├── extra/
-│ └── import_TIN.py
-└── README.md
+├── README.md           # This file
+├── agg_utils.py        # Argument parser, graph plotter, and seed initialiser
+├── data.py             # Data loading & preprocessing
+├── experiments.txt     # Parameter combinations for all experiments - used by 
+├── fedalg.py           # Contains multiple functions that train and test the federated learning setup - includes main()
+├── import_TIN.py       # Imports Tiny-ImageNet and saves a cached version of it in ./data/
+├── models.py           # ResNet18/ResNet50 architectures
+├── plotting.py            # Plots graphs after experiments have run
+├── plotting.sh         # SLURM script to run plotting.py
+├── requirements.txt    # Dependencies
+├── run_experiments.sh  # SLURM script to run fedalg.py
+└── utils.py            # Aggregation algorithms for FedAvg, FedProx, FedACG, and LaS
 ```
 
 # Datasets
@@ -41,7 +43,7 @@ tar -xvzf ./data/cifar-10-python.tar.gz -C ./data/
 Manually download TinyImageNet:
 wget http://cs231n.stanford.edu/tiny-imagenet-200.zip
 unzip tiny-imagenet-200.zip -d ./data/
-then run: python import_tin.py to cache the dataset
+then run: import_tin.py to cache the dataset
 
 The final structure should look like this:
 ```
@@ -60,34 +62,30 @@ The final structure should look like this:
 └── tinyimagenet_val_cache.pt
 ```
 
-# Plotting graphs
-Loss and accuracy graphs are automatically plotted and stored in the same folder as the checkpoints (Created upon training).
-There is the option to produce additional graphs by running the following for example:
-
-python plotting.py \
-  --csv_dir [checkpoints folder] \
-  --output_dir [desired folder] \
-  --dirichlet IID \
-  --dataset CIF \
-  --seed 42
-
 # Running the Code
-All args can be found in ./utils.py
+All command-line args can be found in ./utils.py
 
 ##  Local Execution
 Example (FedAvg on CIFAR-10):
-python main.py --algorithm fedavg --dataset CIFAR10 --dirichlet 0.1 --n_epochs 50 --seed 42
+python main.py --algorithm fedavg --dataset CIFAR10 --dirichlet 0.1 --n_epochs 100 --seed 42
 
 ## HPC (SLURM) Execution
-If running on a SLURM-based HPC, use the provided job scripts in ./scripts/.
+If running on a SLURM-based HPC, use the provided job script: run_experiments.sh
 
 Example submission:
 sbatch scripts/run_experiment.sh
 
+# Plotting graphs
+Loss and accuracy graphs are automatically plotted and stored in ./plots/ after running fedalg.py
+There is the option to produce additional graphs that are stored in ./final plots/ by running the following for example:
+
+python plotting.py \
+  --csv_dir metrics \
+  --output_dir final_plots \
+  --dataset CIFAR10
+
 # Notes
 
-.sh job scripts are included in ./scripts/ for reproducibility on HPC.
+.sh job scripts are included for reproducibility on HPC.
 
-On local machines, you can ignore them and just run python main.py ....
-
-Results are written to the output directory specified in your job script.
+On local machines, you can ignore them and just run the python files directly
