@@ -6,7 +6,14 @@ class ResNet(nn.Module):
     ResNet wrapper for CIFAR-10 and Tiny-ImageNet.
     Supports ResNet-18 and ResNet-50.
     """
-    def __init__(self, depth=18, n_classes=10, pretrained=False): # Default CIFAR10 with ResNet18
+    def __init__(self, depth=18, n_classes=10, pretrained=False):
+        """
+        Args:
+            depth (int): ResNet depth (18 or 50)
+            n_classes (int): Number of output classes (default 10 for CIFAR-10)
+            pretrained (bool): Whether to load ImageNet pretrained weights
+        """
+        
         super(ResNet, self).__init__()
         
         # Choose ResNet depth
@@ -31,4 +38,5 @@ class ResNet(nn.Module):
         self.model.fc = nn.Linear(self.model.fc.in_features, n_classes)
 
     def forward(self, x):
+        """Forward pass through the ResNet backbone"""
         return self.model(x)

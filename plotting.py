@@ -5,17 +5,33 @@ import os
 from datetime import datetime
 
 def arg_parser():
+    """Collect command-line arguments"""
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--csv_dir", type=str, default="results")
-    parser.add_argument("--output_dir", type=str, default="plots")
-    parser.add_argument("--algorithm", type=str, default="plots")
-    parser.add_argument("--dataset", type=str, default="plots")
+    parser.add_argument("--csv_dir", type=str, default="results",
+                        help="Directory containing CSV files with logged metrics")
+    parser.add_argument("--output_dir", type=str, default="plots",
+                        help="Directory to save generated plots")
+    parser.add_argument("--algorithm", type=str, default="las",
+                        help="Federated learning aggregation method to filter plots")
+    parser.add_argument("--dataset", type=str, default="CIFAR10",
+                        help="Dataset to filter plots")
 
     return parser.parse_args()
 
 
 def plot_las_curves(dset, algorithm, csv_dir, output_dir):
+    """
+    Plot training and validation accuracy curves for the LaS algorithm
+    across different Dirichlet splits (IID, 0.1, 1.0).
+    
+    Args:
+        dset (str): Dataset name to filter CSV files
+        algorithm (str): Algorithm name (used in output filename)
+        csv_dir (str): Directory containing CSV logs
+        output_dir (str): Directory to save the plots
+    """
+
     plt.figure(figsize=(8, 5))
 
     metric = "accs"
@@ -31,20 +47,18 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
             diri = filename[2]
             filepath = os.path.join(csv_dir, file)
 
-            # Only plot for the chosen dataset
-            if dataset != dset:
-                continue
-
-            # Only plot for the chosen algorithm
-            if algo != "las":
+            # Only consider chosen dataset and LaS algorithm
+            if dataset != dset or algo != "las":
                 continue
 
             df = pd.read_csv(filepath)
 
+            # Skip if metrics are missing
             if col_train not in df.columns or col_val not in df.columns:
                 print(f"Skipping {file}, missing {col_train} or {col_val}")
                 continue
 
+            # Map Dirichlet splits to consistent colours
             algo_colors = {
                 "IID": "tab:blue",
                 "0.1": "tab:orange",
@@ -65,6 +79,7 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
     plt.legend()
     plt.grid(True)
 
+    # Save plot with timestamp for uniqueness
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"{dataset}_{algorithm}_{metric}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
     plt.savefig(path, dpi=300, bbox_inches="tight")
@@ -72,8 +87,16 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
 
 
 def plot_val_curves(dset, csv_dir, output_dir):
-    plt.figure(figsize=(8, 5))
+    """
+    Plot validation accuracy curves for all algorithms on a given dataset.
     
+    Args:
+        dset (str): Dataset name to filter CSV files
+        csv_dir (str): Directory containing CSV logs
+        output_dir (str): Directory to save the plots
+    """
+
+    plt.figure(figsize=(8, 5))
     col = "val_accs"
 
     # Loop through all CSV files in directory
@@ -85,7 +108,7 @@ def plot_val_curves(dset, csv_dir, output_dir):
             diri = filename[2]
             filepath = os.path.join(csv_dir, file)
 
-            # Only plot for the chosen dataset
+            # Only consider chosen dataset
             if dataset != dset:
                 continue
 
@@ -98,11 +121,13 @@ def plot_val_curves(dset, csv_dir, output_dir):
 
             epochs = range(1, len(df[col]) + 1)
             
+            # Assign colours based on algorithm
             if algorithm == "fedavg": color="tab:blue"
             elif algorithm == "fedacg": color="tab:red"
             elif algorithm == "fedprox": color="tab:orange"
             else: color="tab:green"
 
+            # Assign linestyles based on Dirichlet split
             if diri == "0.1": linestyle="-"
             elif diri == "1.0": linestyle="--"
             else: 
@@ -114,6 +139,8 @@ def plot_val_curves(dset, csv_dir, output_dir):
     plt.title(f"Validation Accuracy Curves on {dataset}")
     plt.xlabel("Epoch")
     plt.ylabel(f"Accuracy (%)")
+
+    # Sort legend entries for readability
     handles, labels = plt.gca().get_legend_handles_labels()
     labels, handles = zip(*sorted(zip(labels, handles), key=lambda x: x[0]))
     plt.legend(handles, labels)
@@ -126,7 +153,17 @@ def plot_val_curves(dset, csv_dir, output_dir):
 
 
 def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
-    # Create a fresh figure for each call
+    """
+    Plot training and validation accuracy curves for all algorithms
+    on a fixed dataset and fixed Dirichlet split.
+    
+    Args:
+        dset (str): Dataset name to filter CSV files
+        dirichlet (str): Dirichlet alpha value (e.g. "nan", "0.1", "1.0")
+        csv_dir (str): Directory containing CSV logs
+        output_dir (str): Directory to save the plots
+    """
+
     plt.figure(figsize=(8, 5))
 
     col_train = "train_accs"
@@ -141,15 +178,9 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
             diri = filename[2]
             filepath = os.path.join(csv_dir, file)
 
-            # Only plot for the chosen dataset
-            if dataset != dset:
+            # Only consider chosen dataset and Dirichlet split
+            if dataset != dset or diri != dirichlet:
                 continue
-
-            # Only plot for the chosen dirichlet
-            if diri != dirichlet:
-                continue
-            
-            print(os.path.basename(file))
 
             df = pd.read_csv(filepath)
 
@@ -157,6 +188,7 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
                 print(f"Skipping {file}, missing {col_train} or {col_val}")
                 continue
 
+            # Assign colours consistently to algorithms
             algo_colors = {
                 "fedavg": "tab:blue",
                 "fedacg": "tab:red",
@@ -182,6 +214,7 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
                      linewidth=1.0)
 
     if dirichlet == "nan": dirichlet = "IID"
+
     plt.title(f"Training and Validation Accuracy Curves on {dataset} (Dirichlet={dirichlet})")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy (%)")
@@ -194,11 +227,12 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
         f"{dset}_{dirichlet}_accs_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png"
     )
     plt.savefig(path)
-    plt.close()  # close figure so next call starts clean
+    plt.close() # close figure to free memory when looping 
     print(f"Plot saved to {path}")
 
 
 def main():
+    """Main entry point: parse args and generate plots"""
     args = arg_parser()
     plot_las_curves(args.dataset, args.algorithm, args.csv_dir, args.output_dir)
     plot_val_curves(args.dataset, args.csv_dir, args.output_dir)

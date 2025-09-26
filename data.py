@@ -7,7 +7,9 @@ import random
 
 
 class CIFAR10Dataset(datasets.CIFAR10): # CIFAR10
+    """ CIFAR-10 dataset wrapper with standard normalisation.""" 
     N_CLASSES = 10
+
     def __init__(self, root="./data", train=True):
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -17,12 +19,16 @@ class CIFAR10Dataset(datasets.CIFAR10): # CIFAR10
         super().__init__(root=root, train=train, download=False, transform=transform)
 
     def __getitem__(self, index):
+        """Return transformed image and label at given index."""
         x, y = self.data[index], self.targets[index]
         x = self.transform(x)
         return x, y
 
+
 class CIFAR10TinyDataset(datasets.CIFAR10): # CIFAR10T
+    """ Small random subset of CIFAR-10 (1000 samples)."""
     N_CLASSES = 10
+
     def __init__(self, root="./data", train=True):
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -31,16 +37,21 @@ class CIFAR10TinyDataset(datasets.CIFAR10): # CIFAR10T
         ])
         super().__init__(root=root, train=train, download=False, transform=transform)
 
+        # Randomly sample 1000 examples
         indices = random.sample(range(len(self.data)), 1000)
         self.data = self.data[indices]
         self.targets = [self.targets[i] for i in indices]
 
     def __getitem__(self, index):
+        """Return transformed image and label at given index."""
         x, y = self.data[index], self.targets[index]
         x = self.transform(x)
         return x, y
 
+
 class TinyImageNetCachedDataset(Dataset): # TinyImageNet
+    """ TinyImageNet dataset loaded from pre-computed cache."""
+
     def __init__(self, data_dir="./data", split="train"):
         cache_file = os.path.join(data_dir, f"tinyimagenet_{split}_cache.pt")
         if not os.path.exists(cache_file):
@@ -52,13 +63,27 @@ class TinyImageNetCachedDataset(Dataset): # TinyImageNet
         self.targets = cache["targets"]
 
     def __len__(self):
+        """Return number of samples."""
         return len(self.targets)
 
     def __getitem__(self, idx):
+        """Return sample and label at given index."""
         return self.samples[idx], self.targets[idx]
 
 
 def load_datasets(dataset="CIFAR10"):
+    """
+    Load dataset splits for training, validation, and testing.
+
+    Args:
+        dataset (str): One of ["CIFAR10", "TinyImageNet", "CIFAR10T"]
+
+    Returns:
+        train_ds (Dataset): Training set
+        val_ds (Dataset): Validation set (10% of training data)
+        test_ds (Dataset): Test set
+    """
+
     if dataset == "CIFAR10":
         train_ds = CIFAR10Dataset(train=True)
         test_ds    = CIFAR10Dataset(train=False)
@@ -74,6 +99,7 @@ def load_datasets(dataset="CIFAR10"):
     else:
         raise ValueError(f"Invalid dataset name, {dataset}")
 
+    # Split training into train/val (90%/10%)
     n = len(train_ds)
     n_val = int(0.1 * n)
     n_train = n - n_val
@@ -88,25 +114,27 @@ def load_datasets(dataset="CIFAR10"):
 
 
 class FederatedSampler(Sampler):
-    def __init__(self, dataset, n_clients, dir_alpha):
-        """Sampler for federated learning in both iid and non-iid settings.
+    """
+    Sampler for partitioning datasets across federated clients.
 
-        Args:
-            dataset (Sequence): Dataset to sample from.
-            non_iid (int): 0: IID, 1: Non-IID
-            n_clients (Optional[int], optional): Number of clients.
-            dir_alpha (Optional[int], optional): Dirichlet dist. param.
-        """
+    Args:
+        dataset (Dataset): Dataset to partition
+        n_clients (int): Number of clients
+        dir_alpha (float): Dirichlet parameter. If NaN, defaults to IID.
+    """
+    def __init__(self, dataset, n_clients, dir_alpha):
         self.dataset = dataset
         self.n_clients = n_clients
         self.dir_alpha = dir_alpha
 
+        # Choose sampling strategy
         if np.isnan(self.dir_alpha):
             self.dict_users = self._sample_iid()
         else:
             self.dict_users = self._sample_non_iid()
 
     def _sample_iid(self):
+        """Partition dataset equally at random among clients."""
         num_items = len(self.dataset) // self.n_clients
         dict_users, all_idxs = {}, [i for i in range(len(self.dataset))]
 
@@ -120,6 +148,8 @@ class FederatedSampler(Sampler):
         return dict_users
 
     def _sample_non_iid(self):
+        """Partition dataset using Dirichlet distribution over classes."""
+        # Extract labels
         if hasattr(self.dataset, 'dataset') and hasattr(self.dataset.dataset, 'targets'):
             all_indices = np.arange(len(self.dataset))
             labels = np.array([self.dataset.dataset.targets[i] for i in all_indices])
@@ -150,15 +180,17 @@ class FederatedSampler(Sampler):
         return dict_users
 
     def set_client(self, client_id: int):
+        """Fix current client for sampling."""
         self.client_id = client_id
 
     def __iter__(self):
-        # fetch dataset indexes based on current client
+        """Get indices for current client's partition."""
         client_idxs = list(self.dict_users[self.client_id])
         for item in client_idxs:
             yield int(item)
     
     def __len__(self):
+        """Return size of current client's partition, or full dataset if unset."""
         if hasattr(self, 'client_id'):
             return len(self.dict_users[self.client_id])
         else:
