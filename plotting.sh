@@ -23,8 +23,8 @@ cd /users/adgs945/Individual_project_code_
 # Run the Python training script
 python3 plotting.py \
   --csv_dir "metrics" \
-  --output_dir "final plots/TIN" \
-  --algorithm las \
-  --dataset TinyImageNet
+  --output_dir "final plots/CIF2" \
+  --algorithm las-fl \
+  --dataset CIFAR10
 
 echo "Finished array task $SLURM_ARRAY_TASK_ID at $(date)"

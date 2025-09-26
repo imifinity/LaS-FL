@@ -22,7 +22,7 @@ def arg_parser():
 
 def plot_las_curves(dset, algorithm, csv_dir, output_dir):
     """
-    Plot training and validation accuracy curves for the LaS algorithm
+    Plot training and validation accuracy curves for the LaS-FL algorithm
     across different Dirichlet splits (IID, 0.1, 1.0).
     
     Args:
@@ -47,7 +47,7 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
             diri = filename[2]
             filepath = os.path.join(csv_dir, file)
 
-            # Only consider chosen dataset and LaS algorithm
+            # Only consider chosen dataset and LaS-FL algorithm
             if dataset != dset or algo != "las":
                 continue
 
@@ -73,7 +73,7 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
             plt.plot(epochs, df[col_train], color=color, label=f"Dir {diri} (train)", linestyle="-")
             plt.plot(epochs, df[col_val], color=color, label=f"Dir {diri} (val)", linestyle="--")
 
-    plt.title(f"LaS Training and Validation Accuracy Curves on {dataset}")
+    plt.title(f"LaS-FL Training and Validation Accuracy Curves on {dset}")
     plt.xlabel("Round")
     plt.ylabel("Accuracy (%)")
     plt.legend()
@@ -81,7 +81,7 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
 
     # Save plot with timestamp for uniqueness
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, f"{dataset}_{algorithm}_{metric}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
+    path = os.path.join(output_dir, f"{dset}_{algorithm}_{metric}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
     plt.savefig(path, dpi=300, bbox_inches="tight")
     print(f"Plot saved to {path}")
 
@@ -133,10 +133,10 @@ def plot_val_curves(dset, csv_dir, output_dir):
             else: 
                 linestyle=":"
                 diri = "IID"
+            if algorithm == "las": algorithm = "las-fl"
+            plt.plot(epochs, df[col], color=color, linestyle=linestyle, linewidth=1.1, label=f"{algorithm} ({diri})")
 
-            plt.plot(epochs, df[col], color=color, linestyle=linestyle, linewidth=1.1, label=f"{algorithm}_{diri}")
-
-    plt.title(f"Validation Accuracy Curves on {dataset}")
+    plt.title(f"Validation Accuracy Curves on {dset}")
     plt.xlabel("Epoch")
     plt.ylabel(f"Accuracy (%)")
 
@@ -147,7 +147,7 @@ def plot_val_curves(dset, csv_dir, output_dir):
     plt.grid(True)
 
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, f"{dataset}_{col}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
+    path = os.path.join(output_dir, f"{dset}_{col}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
     plt.savefig(path)
     print(f"Plot saved to {path}")
 
@@ -193,8 +193,10 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
                 "fedavg": "tab:blue",
                 "fedacg": "tab:red",
                 "fedprox": "tab:orange",
-                "las": "tab:green"
+                "las-fl": "tab:green"
             }
+
+            if algorithm == "las": algorithm = "las-fl"
 
             epochs = range(1, len(df[col_train]) + 1)
             color = algo_colors.get(algorithm, "black")
@@ -215,7 +217,7 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
 
     if dirichlet == "nan": dirichlet = "IID"
 
-    plt.title(f"Training and Validation Accuracy Curves on {dataset} (Dirichlet={dirichlet})")
+    plt.title(f"Training and Validation Accuracy Curves on {dset} (Dirichlet={dirichlet})")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy (%)")
     plt.legend()
