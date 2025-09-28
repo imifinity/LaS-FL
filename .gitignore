@@ -5,8 +5,4 @@ data/*
 slurm_jobs/
 .python-version
 all_not_in_use/
-results.csv
-metrics/
-plots/
-final plots/
 plot_jobs/
