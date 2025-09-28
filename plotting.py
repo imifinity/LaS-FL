@@ -55,7 +55,6 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
 
             # Skip if metrics are missing
             if col_train not in df.columns or col_val not in df.columns:
-                print(f"Skipping {file}, missing {col_train} or {col_val}")
                 continue
 
             # Map Dirichlet splits to consistent colours
@@ -83,7 +82,6 @@ def plot_las_curves(dset, algorithm, csv_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"{dset}_{algorithm}_{metric}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
     plt.savefig(path, dpi=300, bbox_inches="tight")
-    print(f"Plot saved to {path}")
 
 
 def plot_val_curves(dset, csv_dir, output_dir):
@@ -116,7 +114,6 @@ def plot_val_curves(dset, csv_dir, output_dir):
             df = pd.read_csv(filepath)
 
             if col not in df.columns:
-                print(f"Skipping {file}, no '{col}' column found")
                 continue
 
             epochs = range(1, len(df[col]) + 1)
@@ -149,7 +146,6 @@ def plot_val_curves(dset, csv_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"{dset}_{col}_curves_{datetime.now().strftime('%m-%d__%H-%M-%S')}.png")
     plt.savefig(path)
-    print(f"Plot saved to {path}")
 
 
 def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
@@ -185,7 +181,6 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
             df = pd.read_csv(filepath)
 
             if col_train not in df.columns or col_val not in df.columns:
-                print(f"Skipping {file}, missing {col_train} or {col_val}")
                 continue
 
             # Assign colours consistently to algorithms
@@ -230,7 +225,6 @@ def plot_dir_curves(dset, dirichlet, csv_dir, output_dir):
     )
     plt.savefig(path)
     plt.close() # close figure to free memory when looping 
-    print(f"Plot saved to {path}")
 
 
 def main():
