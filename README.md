@@ -20,9 +20,9 @@ pip install -r requirements.txt
 .
 ├── data/               # Empty - all data for CIFAR10 and TinyImageNet to be downloaded here
 ├── README.md           # This file
-├── agg_utils.py        # Argument parser, graph plotter, and seed initialiser
+├── agg_utils.py        # Aggregation algorithms for FedAvg, FedProx, FedACG, and LaS-FL
 ├── data.py             # Data loading & preprocessing
-├── experiments.txt     # Parameter combinations for all experiments - used by 
+├── experiments.txt     # Parameter combinations for all experiments - used by run_experiments.sh
 ├── fedalg.py           # Contains multiple functions that train and test the federated learning setup - includes main()
 ├── import_TIN.py       # Imports Tiny-ImageNet and saves a cached version of it in ./data/
 ├── models.py           # ResNet18/ResNet50 architectures
@@ -30,7 +30,7 @@ pip install -r requirements.txt
 ├── plotting.sh         # SLURM script to run plotting.py
 ├── requirements.txt    # Dependencies
 ├── run_experiments.sh  # SLURM script to run fedalg.py
-└── utils.py            # Aggregation algorithms for FedAvg, FedProx, FedACG, and LaS
+└── utils.py            # Argument parser, graph plotter, and seed initialiser
 ```
 
 # Datasets
