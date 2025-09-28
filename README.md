@@ -90,3 +90,5 @@ python plotting.py --csv_dir metrics --output_dir final_plots --dataset CIFAR10
 .sh job scripts are included for reproducibility on HPC.
 
 On local machines, you can ignore them and just run the python files directly
+
+Reference: He, Y., Hu, Y., Lin, Y., Zhang, T. & Zhao, H. (2025), ‘Localize-and-stitch: Efficient model merging via sparse task arithmetic’. Available at: https://arxiv.org/abs/2408.13656
