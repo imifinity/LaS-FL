@@ -1,6 +1,6 @@
 # Localised Model Merging for Federated Learning
 
-This repository contains the implementation of several federated learning algorithms, including **FedAvg**, **FedProx**, **FedAcg**, and **Localize-and-Stitch (LaS)**, evaluated on datasets CIFAR-10 and TinyImageNet.  
+This repository contains the implementation of several federated learning algorithms, including **FedAvg**, **FedProx**, **FedAcg**, and our implementation, **LaS-FL**, evaluated on datasets CIFAR-10 and TinyImageNet.  
 
 The project addresses the following research question:
 “Can localised model merging methods like ‘Localize-and-Stitch’ be effectively adapted to federated learning environments in a way that maintains high performance while reducing communication and storage costs across different levels of data heterogeneity?”
