@@ -5,8 +5,12 @@ This repository contains the implementation of several federated learning algori
 The project addresses the following research question:
 “Can localised model merging methods like ‘Localize-and-Stitch’ be effectively adapted to federated learning environments in a way that maintains high performance while reducing communication and storage costs across different levels of data heterogeneity?”
 
-Abstract:
-...
+## Abstract:
+Federated Learning enables collaborative training without centralising raw data, but remains limited by communication bottlenecks, data heterogeneity, and slower convergence compared to centralised methods. This dissertation explores Localize-and-Stitch for Federated Learning (LaS-FL), an adaptation of a localised model merging approach proposed by He et al. (2025), as an alternative to standard, global aggregation techniques. Rather than averaging full model updates, LaS-FL selectively merges subsets of parameters, aiming to reduce communication while maintaining accuracy.
+
+LaS-FL was evaluated on CIFAR-10 and Tiny-ImageNet under varying data distributions, with comparisons based on accuracy, F1-score, communication cost, and average training time. On CIFAR-10, LaS-FL achieved comparable or stronger performance than baselines, while on Tiny-ImageNet it lagged by around 5% but remained competitive. Crucially, across both datasets LaS-FL reduced communication by a factor of five to six per round. 
+
+These findings suggest that localised model merging can be feasibly integrated into FL, offering meaningful efficiency gains. At the same time, results highlight the need for refinement to ensure robustness on larger, more heterogeneous datasets. This work therefore represents an initial step towards communication-efficient federated training with localised model merging.
 
 ---
 
