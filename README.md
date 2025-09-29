@@ -23,18 +23,22 @@ pip install -r requirements.txt
 ```
 .
 ├── data/               # Empty - all data for CIFAR10 and TinyImageNet to be downloaded here
-├── README.md           # This file
-├── agg_utils.py        # Aggregation algorithms for FedAvg, FedProx, FedACG, and LaS-FL
-├── data.py             # Data loading & preprocessing
-├── experiments.txt     # Parameter combinations for all experiments - used by run_experiments.sh
-├── fedalg.py           # Contains multiple functions that train and test the federated learning setup - includes main()
-├── import_TIN.py       # Imports Tiny-ImageNet and saves a cached version of it in ./data/
+├── final_plots/        # Final training/validation accuracy plots for comparison
+├── metrics/            # Raw training/validation performance metrics for each experiment
+├── plots/              # Accuracy/loss line plots for each experiment
+├── README.md           # Project documentation (this file)
+├── agg_utils.py        # Aggregation algorithms: FedAvg, FedProx, FedACG, LaS-FL
+├── data.py             # Data loading and preprocessing
+├── experiments.txt     # Parameter combinations for experiments (used by run_experiments.sh)
+├── fedalg.py           # Federated training/testing loop (includes main())
+├── import_TIN.py       # Imports Tiny-ImageNet and caches it in ./data/
 ├── models.py           # ResNet18/ResNet50 architectures
-├── plotting.py         # Plots graphs after experiments have run
-├── plotting.sh         # SLURM script to run plotting.py
-├── requirements.txt    # Dependencies
-├── run_experiments.sh  # SLURM script to run fedalg.py
-└── utils.py            # Argument parser, graph plotter, and seed initialiser
+├── plotting.py         # Generates plots from experiment results
+├── plotting.sh         # SLURM script for plotting.py
+├── requirements.txt    # Python dependencies
+├── results.csv         # Raw test results
+├── run_experiments.sh  # SLURM script for fedalg.py
+└── utils.py            # Argument parser, plotting utilities, seed initialiser
 ```
 
 # Datasets
